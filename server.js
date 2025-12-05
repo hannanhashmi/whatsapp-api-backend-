@@ -12,6 +12,9 @@ require('dotenv').config();
 const app = express();
 const server = http.createServer(app);
 
+
+
+
 // Socket.IO with CORS
 const io = socketIo(server, {
   cors: {
@@ -268,6 +271,11 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
   });
+});
+
+// Initialize database
+initializeDatabase().then(() => {
+  console.log('📊 Database ready');
 });
 
 // Auto cleanup every 30 minutes
