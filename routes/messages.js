@@ -1,31 +1,56 @@
 // n8n से messages receive करने के लिए नया endpoint
-router.post('/n8n-webhook', async (req, res) => {
+router.post('/api/n8n-messages', async (req, res) => {
   try {
-    const { body } = req;
+    console.log('Received message from n8n:', req.body);
     
-    // n8n format से Meta format में convert करें
+    const { message, from, to, timestamp, messageId, direction = 'outgoing' } = req.body;
+    
+    // Format को Meta webhook format में convert करें
     const metaFormat = {
+      object: 'whatsapp_business_account',
       entry: [{
+        id: 'n8n-entry',
         changes: [{
           value: {
-            messages: [{
-              from: body.recipient,
-              text: { body: body.message }
-            }],
+            messaging_product: 'whatsapp',
+            metadata: {
+              display_phone_number: to || from,
+              phone_number_id: process.env.PHONE_NUMBER_ID || 'n8n-phone-id'
+            },
             contacts: [{
-              wa_id: body.recipient
+              profile: {
+                name: 'User'
+              },
+              wa_id: from
+            }],
+            messages: [{
+              from: from,
+              id: messageId || `n8n-${Date.now()}`,
+              timestamp: timestamp || Math.floor(Date.now() / 1000),
+              type: 'text',
+              text: {
+                body: message
+              }
             }]
-          }
+          },
+          field: 'messages'
         }]
       }]
     };
     
-    // Existing message processing logic का use करें
-    await processMessage(metaFormat);
+    // आपके existing processWebhook function को call करें
+    await processWebhook(metaFormat);
     
-    res.status(200).json({ success: true });
+    res.status(200).json({ 
+      success: true, 
+      message: 'Message processed successfully' 
+    });
+    
   } catch (error) {
-    console.error('n8n webhook error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Error processing n8n message:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
   }
 });
