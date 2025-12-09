@@ -408,6 +408,8 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
+
+
 async function processIncomingMessage(message) {
   const phone = message.from;
   const content = message.text?.body || '[Media/File Message]';
@@ -428,6 +430,55 @@ async function processIncomingMessage(message) {
       status: 'delivered'
     });
 
+    // 🔁 CRITICAL: Forward to n8n webhook (FIXED)
+    try {
+      if (process.env.N8N_WEBHOOK_URL) {
+        console.log(`🔄 Forwarding to n8n: ${process.env.N8N_WEBHOOK_URL}`);
+        
+        await axios.post(process.env.N8N_WEBHOOK_URL, {
+          // n8n के लिए format
+          object: 'whatsapp_business_account',
+          entry: [{
+            id: 'backend-forward',
+            changes: [{
+              value: {
+                messaging_product: 'whatsapp',
+                metadata: {
+                  display_phone_number: process.env.PHONE_NUMBER_ID,
+                  phone_number_id: process.env.PHONE_NUMBER_ID
+                },
+                contacts: [{
+                  profile: { name: contact.name },
+                  wa_id: phone
+                }],
+                messages: [{
+                  from: phone,
+                  id: message.id,
+                  timestamp: message.timestamp,
+                  type: 'text',
+                  text: { body: content }
+                }]
+              },
+              field: 'messages'
+            }]
+          }]
+        }, {
+          headers: { 
+            'Content-Type': 'application/json',
+            'X-Backend-Source': 'whatsapp-backend'
+          },
+          timeout: 5000
+        });
+        
+        console.log("✅ Successfully forwarded to n8n");
+      } else {
+        console.log("⚠️ N8N_WEBHOOK_URL not configured");
+      }
+    } catch (error) {
+      console.error("❌ Failed forwarding to n8n:", error.message);
+      // Continue even if n8n forwarding fails
+    }
+    
     // 🔁 Forward message to n8n webhook (using axios instead of fetch)
     try {
       if (process.env.N8N_WEBHOOK_URL) {
