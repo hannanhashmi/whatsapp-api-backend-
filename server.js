@@ -2,7 +2,7 @@
 const { Pool } = require('pg');
 const express = require('express');
 const bodyParser = require('body-parser');
-const axios = require('axios');
+const axios = require('axios'); // ✅ axios already included
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
@@ -19,6 +19,48 @@ const pool = new Pool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
 });
+
+// ==================== MIDDLEWARE ====================
+
+// CORS Configuration
+app.use(cors({
+  origin: "*",
+  credentials: true
+}));
+
+app.use(bodyParser.json());
+
+// API Key Middleware for n8n
+const verifyN8nApiKey = (req, res, next) => {
+  // Skip for public endpoints
+  const publicPaths = ['/', '/ping', '/health', '/webhook', '/api/chats', '/api/send'];
+  if (publicPaths.includes(req.path)) {
+    return next();
+  }
+  
+  // For n8n endpoints
+  if (req.path.startsWith('/api/n8n')) {
+    const apiKey = req.headers['authorization']?.replace('Bearer ', '');
+    const secretKey = req.headers['x-n8n-secret'];
+    
+    const validApiKey = apiKey === process.env.N8N_API_KEY;
+    const validSecret = secretKey === process.env.N8N_SECRET;
+    
+    if (validApiKey || validSecret) {
+      return next();
+    }
+    
+    console.log('❌ Invalid n8n API key attempt');
+    return res.status(401).json({ 
+      success: false, 
+      error: 'Invalid API credentials' 
+    });
+  }
+  
+  next();
+};
+
+app.use(verifyN8nApiKey);
 
 // Initialize Database Tables
 async function initializeDatabase() {
@@ -299,14 +341,6 @@ const io = socketIo(server, {
   transports: ['websocket', 'polling']
 });
 
-// CORS Configuration
-app.use(cors({
-  origin: "*",
-  credentials: true
-}));
-
-app.use(bodyParser.json());
-
 // Store chats in memory (for backward compatibility)
 let chats = {};
 const MAX_CHATS = 100;
@@ -394,20 +428,21 @@ async function processIncomingMessage(message) {
       status: 'delivered'
     });
 
-      // 🔁 Forward message to n8n webhook
+    // 🔁 Forward message to n8n webhook (using axios instead of fetch)
     try {
-      await fetch(process.env.N8N_WEBHOOK_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      if (process.env.N8N_WEBHOOK_URL) {
+        await axios.post(process.env.N8N_WEBHOOK_URL, {
           from: phone,
           message: content,
           timestamp: timestamp,
-          contactName: contact.name
-        })
-      });
-      console.log("🔁 Message forwarded to N8N successfully");
-      
+          contactName: contact.name,
+          source: 'whatsapp_webhook',
+          direction: 'incoming'
+        }, {
+          headers: { 'Content-Type': 'application/json' }
+        });
+        console.log("🔁 Message forwarded to N8N successfully");
+      }
     } catch (error) {
       console.error("❌ Failed forwarding to N8N:", error.message);
     }
@@ -440,7 +475,8 @@ async function processIncomingMessage(message) {
       message: content,
       timestamp: timestamp,
       contactName: contact.name,
-      messageId: savedMessage.id
+      messageId: savedMessage.id,
+      source: 'whatsapp'
     });
     
     console.log(`💾 Saved message to database: ${phone}`);
@@ -449,6 +485,148 @@ async function processIncomingMessage(message) {
     console.error('Error processing incoming message:', error);
   }
 }
+
+// ==================== N8N INTEGRATION ENDPOINTS ====================
+
+// Endpoint to receive messages from n8n (OUTGOING MESSAGES)
+app.post('/api/n8n/messages', async (req, res) => {
+  try {
+    console.log('📩 Received message from n8n:', req.body);
+    
+    const { 
+      to,          // Recipient phone number
+      message,     // Message content
+      timestamp = new Date().toISOString(),
+      messageId,
+      contactName,
+      direction = 'outgoing',
+      source = 'n8n'
+    } = req.body;
+    
+    // Validate required fields
+    if (!to || !message) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required fields: to and message' 
+      });
+    }
+    
+    console.log(`📤 Processing n8n message to ${to}: ${message.substring(0, 50)}...`);
+    
+    // Save to database as outgoing message
+    const contact = await dbHelpers.findOrCreateContact(to, contactName);
+    const chat = await dbHelpers.findOrCreateChat(contact.id, to);
+    
+    const savedMessage = await dbHelpers.addMessage(chat.id, contact.id, {
+      type: 'sent',
+      content: message,
+      whatsappMessageId: messageId || `n8n-${Date.now()}`,
+      timestamp: new Date(timestamp),
+      status: 'sent'
+    });
+    
+    // Also store in memory for backward compatibility
+    if (!chats[to]) {
+      chats[to] = {
+        number: to,
+        name: contactName || `+${to}`,
+        messages: [],
+        unread: 0,
+        lastMessage: new Date()
+      };
+    }
+    
+    chats[to].messages.push({
+      id: messageId || `n8n-${Date.now()}`,
+      text: message,
+      timestamp: new Date(timestamp),
+      type: 'sent',
+      from: 'me'
+    });
+    
+    chats[to].lastMessage = new Date();
+    
+    // Notify connected clients via Socket.IO
+    io.emit('new_message', {
+      from: to,
+      message: message,
+      timestamp: new Date(timestamp),
+      contactName: contact.name,
+      messageId: savedMessage.id,
+      source: 'n8n',
+      direction: 'outgoing'
+    });
+    
+    console.log(`✅ n8n message saved to database for ${to}`);
+    
+    res.status(200).json({ 
+      success: true, 
+      messageId: savedMessage.id,
+      databaseId: savedMessage.id,
+      timestamp: new Date().toISOString(),
+      message: 'Message saved to database successfully'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error processing n8n message:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// Simulate incoming message from n8n (for testing)
+app.post('/api/n8n/simulate-incoming', async (req, res) => {
+  try {
+    const { from, message } = req.body;
+    
+    if (!from || !message) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing from or message' 
+      });
+    }
+    
+    // Create fake WhatsApp message
+    const fakeMessage = {
+      from: from,
+      text: { body: message },
+      id: `sim-${Date.now()}`,
+      timestamp: Math.floor(Date.now() / 1000)
+    };
+    
+    // Process as incoming message
+    await processIncomingMessage(fakeMessage);
+    
+    res.status(200).json({ 
+      success: true, 
+      message: 'Simulated incoming message processed' 
+    });
+    
+  } catch (error) {
+    console.error('Error simulating message:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// Get n8n integration status
+app.get('/api/n8n/status', (req, res) => {
+  res.json({
+    n8nIntegration: true,
+    webhookUrl: process.env.N8N_WEBHOOK_URL || 'Not set',
+    apiKeyConfigured: !!process.env.N8N_API_KEY,
+    endpoints: {
+      receiveMessages: 'POST /api/n8n/messages',
+      simulateIncoming: 'POST /api/n8n/simulate-incoming',
+      status: 'GET /api/n8n/status'
+    },
+    timestamp: new Date().toISOString()
+  });
+});
 
 // ==================== API ENDPOINTS ====================
 
@@ -708,7 +886,8 @@ app.get('/ping', (req, res) => {
     uptime: process.uptime(),
     memory: process.memoryUsage(),
     chats_count: Object.keys(chats).length,
-    database: 'PostgreSQL connected'
+    database: 'PostgreSQL connected',
+    n8nIntegration: !!process.env.N8N_WEBHOOK_URL
   });
 });
 
@@ -724,7 +903,12 @@ app.get('/health', async (req, res) => {
       service: 'WhatsApp Business API',
       version: '2.0.0',
       environment: process.env.NODE_ENV || 'development',
-      database: 'connected'
+      database: 'connected',
+      n8nIntegration: {
+        enabled: !!process.env.N8N_WEBHOOK_URL,
+        webhookUrl: process.env.N8N_WEBHOOK_URL || 'Not configured',
+        apiKey: process.env.N8N_API_KEY ? 'Configured' : 'Not configured'
+      }
     });
   } catch (error) {
     res.json({
@@ -751,7 +935,8 @@ app.get('/', (req, res) => {
       'Message storage in database',
       'Real-time updates',
       'Contact management',
-      'Chat persistence'
+      'Chat persistence',
+      'n8n Integration'
     ],
     endpoints: {
       webhook: '/webhook (GET/POST)',
@@ -759,6 +944,8 @@ app.get('/', (req, res) => {
       'chats-db': '/api/db/chats (GET)',
       send: '/api/send (POST)',
       contacts: '/api/db/contacts (GET)',
+      'n8n-messages': '/api/n8n/messages (POST)',
+      'n8n-status': '/api/n8n/status (GET)',
       health: '/health (GET)',
       ping: '/ping (GET)'
     }
@@ -794,8 +981,10 @@ async function startServer() {
       console.log(`📍 Port: ${PORT}`);
       console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`💾 Database: PostgreSQL connected`);
+      console.log(`🔄 n8n Integration: ${process.env.N8N_WEBHOOK_URL ? 'Enabled' : 'Disabled'}`);
       console.log(`📞 Endpoint: http://localhost:${PORT}`);
       console.log(`🔧 Ready to receive webhooks from WhatsApp`);
+      console.log(`🔗 n8n Endpoint: POST http://localhost:${PORT}/api/n8n/messages`);
     });
     
   } catch (error) {
