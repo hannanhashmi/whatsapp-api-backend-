@@ -393,6 +393,24 @@ async function processIncomingMessage(message) {
       timestamp: timestamp,
       status: 'delivered'
     });
+
+      // 🔁 Forward message to n8n webhook
+    try {
+      await fetch(process.env.N8N_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from: phone,
+          message: content,
+          timestamp: timestamp,
+          contactName: contact.name
+        })
+      });
+      console.log("🔁 Message forwarded to N8N successfully");
+      
+    } catch (error) {
+      console.error("❌ Failed forwarding to N8N:", error.message);
+    }
     
     // Also store in memory for backward compatibility
     if (!chats[phone]) {
