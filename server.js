@@ -859,7 +859,7 @@ app.get('/health', async (req, res) => {
     // Test n8n connection (optional)
     let n8nStatus = 'not_tested';
     try {
-      const testResponse = await axios.get(N8N_WEBHOOK_URL.replace('/webhook/whatsapp-hook', ''), {
+      const testResponse = await axios.get(N8N_WEBHOOK_URL.replace('/webhook/whatsapp', ''), {
         timeout: 3000
       });
       n8nStatus = 'reachable';
