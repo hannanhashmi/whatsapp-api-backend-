@@ -23,14 +23,11 @@ const pool = new Pool({
 // ==================== MIDDLEWARE ====================
 
 // CORS Configuration
-app.use(
-  cors({
-    origin: (origin, callback) => callback(null, true),
-    credentials: true,
-  })
-);
-
+app.use(cors());
 app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+
+
 
 // N8N Webhook URL - आपका URL
 const N8N_WEBHOOK_URL = "https://xibado3.app.n8n.cloud/webhook/whatsapp";
