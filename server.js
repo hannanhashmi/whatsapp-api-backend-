@@ -23,10 +23,12 @@ const pool = new Pool({
 // ==================== MIDDLEWARE ====================
 
 // CORS Configuration
-app.use(cors({
-  origin: "*",
-  credentials: true
-}));
+app.use(
+  cors({
+    origin: (origin, callback) => callback(null, true),
+    credentials: true,
+  })
+);
 
 app.use(bodyParser.json());
 
