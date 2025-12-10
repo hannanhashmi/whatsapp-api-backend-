@@ -31,7 +31,7 @@ app.use(cors({
 app.use(bodyParser.json());
 
 // N8N Webhook URL - आपका URL
-const N8N_WEBHOOK_URL = "https://xibado3.app.n8n.cloud/webhook/whatsapp-hook";
+const N8N_WEBHOOK_URL = "https://xibado3.app.n8n.cloud/webhook/whatsapp";
 
 // API Key Middleware for n8n
 const verifyN8nApiKey = (req, res, next) => {
