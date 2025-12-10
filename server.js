@@ -12,7 +12,8 @@ const app = express();
 const server = http.createServer(app);
 
 // 👉 ROUTES — yaha rakhna hota hai
-app.use("/messages", require("./routes/messages"));
+const messagesRoute = require('./routes/messages');
+app.use(messagesRoute);
 
 // PostgreSQL Connection Pool
 const pool = new Pool({
