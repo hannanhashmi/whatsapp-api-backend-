@@ -30,6 +30,9 @@ app.use(cors({
 
 app.use(bodyParser.json());
 
+// N8N Webhook URL - आपका URL
+const N8N_WEBHOOK_URL = "https://xibado3.app.n8n.cloud/webhook/whatsapp-hook";
+
 // API Key Middleware for n8n
 const verifyN8nApiKey = (req, res, next) => {
   // Skip for public endpoints
@@ -363,6 +366,64 @@ function cleanupOldData() {
   });
 }
 
+// ==================== N8N INTEGRATION FUNCTION ====================
+
+// Function to forward message to n8n
+async function forwardToN8N(messageData, source) {
+  try {
+    console.log(`🔄 Forwarding to n8n (${source}): ${N8N_WEBHOOK_URL}`);
+    
+    // n8n को आसान format में भेजें
+    const n8nPayload = {
+      // Basic message info
+      from: messageData.phone,
+      message: messageData.content,
+      timestamp: messageData.timestamp || new Date().toISOString(),
+      contactName: messageData.contactName || `+${messageData.phone}`,
+      messageId: messageData.messageId || `msg-${Date.now()}`,
+      
+      // Source information
+      source: source, // 'whatsapp_incoming' or 'dashboard_outgoing'
+      direction: messageData.type === 'received' ? 'incoming' : 'outgoing',
+      
+      // Database IDs (if available)
+      contactId: messageData.contactId,
+      chatId: messageData.chatId,
+      
+      // Additional metadata
+      platform: 'whatsapp',
+      serverTime: new Date().toISOString()
+    };
+    
+    // Add full Meta payload for WhatsApp messages
+    if (source === 'whatsapp_incoming' && messageData.metaPayload) {
+      n8nPayload.metaData = messageData.metaPayload;
+    }
+    
+    const response = await axios.post(N8N_WEBHOOK_URL, n8nPayload, {
+      headers: { 
+        'Content-Type': 'application/json',
+        'X-Source': 'whatsapp-backend',
+        'X-Forwarded-Time': new Date().toISOString()
+      },
+      timeout: 8000 // 8 second timeout
+    });
+    
+    console.log(`✅ Successfully forwarded to n8n. Status: ${response.status}`);
+    return { success: true, response: response.data };
+    
+  } catch (error) {
+    console.error(`❌ Failed to forward to n8n (${source}):`, error.message);
+    
+    // Don't crash the main flow if n8n fails
+    return { 
+      success: false, 
+      error: error.message,
+      timestamp: new Date().toISOString()
+    };
+  }
+}
+
 // ==================== WEBHOOK ENDPOINTS ====================
 
 // Webhook verification
@@ -397,7 +458,7 @@ app.post('/webhook', async (req, res) => {
       for (const change of entry.changes) {
         if (change.field === 'messages' && change.value.messages) {
           const message = change.value.messages[0];
-          await processIncomingMessage(message);
+          await processIncomingMessage(message, body);
         }
       }
     }
@@ -408,17 +469,16 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-
-
-async function processIncomingMessage(message) {
+// Process incoming WhatsApp message
+async function processIncomingMessage(message, metaPayload = null) {
   const phone = message.from;
   const content = message.text?.body || '[Media/File Message]';
   const timestamp = new Date(message.timestamp * 1000);
   
-  console.log(`💬 Processing message from ${phone}: ${content.substring(0, 50)}...`);
+  console.log(`💬 Processing WhatsApp message from ${phone}: ${content.substring(0, 50)}...`);
   
   try {
-    // Save to PostgreSQL database
+    // 1. Save to PostgreSQL database
     const contact = await dbHelpers.findOrCreateContact(phone);
     const chat = await dbHelpers.findOrCreateChat(contact.id, phone);
     
@@ -430,79 +490,31 @@ async function processIncomingMessage(message) {
       status: 'delivered'
     });
 
-    // 🔁 CRITICAL: Forward to n8n webhook (FIXED)
-    try {
-      if (process.env.N8N_WEBHOOK_URL) {
-        console.log(`🔄 Forwarding to n8n: ${process.env.N8N_WEBHOOK_URL}`);
-        
-        await axios.post(process.env.N8N_WEBHOOK_URL, {
-          // n8n के लिए format
-          object: 'whatsapp_business_account',
-          entry: [{
-            id: 'backend-forward',
-            changes: [{
-              value: {
-                messaging_product: 'whatsapp',
-                metadata: {
-                  display_phone_number: process.env.PHONE_NUMBER_ID,
-                  phone_number_id: process.env.PHONE_NUMBER_ID
-                },
-                contacts: [{
-                  profile: { name: contact.name },
-                  wa_id: phone
-                }],
-                messages: [{
-                  from: phone,
-                  id: message.id,
-                  timestamp: message.timestamp,
-                  type: 'text',
-                  text: { body: content }
-                }]
-              },
-              field: 'messages'
-            }]
-          }]
-        }, {
-          headers: { 
-            'Content-Type': 'application/json',
-            'X-Backend-Source': 'whatsapp-backend'
-          },
-          timeout: 5000
-        });
-        
-        console.log("✅ Successfully forwarded to n8n");
-      } else {
-        console.log("⚠️ N8N_WEBHOOK_URL not configured");
-      }
-    } catch (error) {
-      console.error("❌ Failed forwarding to n8n:", error.message);
-      // Continue even if n8n forwarding fails
+    // 2. Forward to n8n IMMEDIATELY
+    const n8nForwardResult = await forwardToN8N({
+      phone: phone,
+      content: content,
+      timestamp: timestamp,
+      contactName: contact.name,
+      messageId: message.id,
+      type: 'received',
+      contactId: contact.id,
+      chatId: chat.id,
+      metaPayload: metaPayload // Pass full Meta payload
+    }, 'whatsapp_incoming');
+    
+    // Log n8n forwarding result
+    if (n8nForwardResult.success) {
+      console.log("✅ WhatsApp message forwarded to n8n successfully");
+    } else {
+      console.log("⚠️ WhatsApp message saved but n8n forwarding failed");
     }
     
-    // 🔁 Forward message to n8n webhook (using axios instead of fetch)
-    try {
-      if (process.env.N8N_WEBHOOK_URL) {
-        await axios.post(process.env.N8N_WEBHOOK_URL, {
-          from: phone,
-          message: content,
-          timestamp: timestamp,
-          contactName: contact.name,
-          source: 'whatsapp_webhook',
-          direction: 'incoming'
-        }, {
-          headers: { 'Content-Type': 'application/json' }
-        });
-        console.log("🔁 Message forwarded to N8N successfully");
-      }
-    } catch (error) {
-      console.error("❌ Failed forwarding to N8N:", error.message);
-    }
-    
-    // Also store in memory for backward compatibility
+    // 3. Store in memory for backward compatibility
     if (!chats[phone]) {
       chats[phone] = {
         number: phone,
-        name: `+${phone}`,
+        name: contact.name || `+${phone}`,
         messages: [],
         unread: 0,
         lastMessage: timestamp
@@ -520,20 +532,21 @@ async function processIncomingMessage(message) {
     chats[phone].lastMessage = timestamp;
     chats[phone].unread++;
     
-    // Notify connected clients via Socket.IO
+    // 4. Notify connected clients via Socket.IO
     io.emit('new_message', {
       from: phone,
       message: content,
       timestamp: timestamp,
       contactName: contact.name,
       messageId: savedMessage.id,
-      source: 'whatsapp'
+      source: 'whatsapp',
+      n8nForwarded: n8nForwardResult.success
     });
     
-    console.log(`💾 Saved message to database: ${phone}`);
+    console.log(`💾 Saved WhatsApp message to database and forwarded to n8n: ${phone}`);
     
   } catch (error) {
-    console.error('Error processing incoming message:', error);
+    console.error('Error processing incoming WhatsApp message:', error);
   }
 }
 
@@ -576,7 +589,7 @@ app.post('/api/n8n/messages', async (req, res) => {
       status: 'sent'
     });
     
-    // Also store in memory for backward compatibility
+    // Store in memory for backward compatibility
     if (!chats[to]) {
       chats[to] = {
         number: to,
@@ -627,59 +640,118 @@ app.post('/api/n8n/messages', async (req, res) => {
   }
 });
 
-// Simulate incoming message from n8n (for testing)
-app.post('/api/n8n/simulate-incoming', async (req, res) => {
+// ==================== DASHBOARD ENDPOINTS ====================
+
+// API: Send message from dashboard
+app.post('/api/send', async (req, res) => {
   try {
-    const { from, message } = req.body;
+    const { to, message } = req.body;
     
-    if (!from || !message) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Missing from or message' 
+    if (!to || !message) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing to or message field'
       });
     }
     
-    // Create fake WhatsApp message
-    const fakeMessage = {
-      from: from,
-      text: { body: message },
-      id: `sim-${Date.now()}`,
-      timestamp: Math.floor(Date.now() / 1000)
-    };
+    console.log(`📤 Dashboard sending message to ${to}: ${message.substring(0, 50)}...`);
     
-    // Process as incoming message
-    await processIncomingMessage(fakeMessage);
+    // 1. Send via WhatsApp API
+    const response = await axios.post(
+      `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: to,
+        type: "text",
+        text: {
+          preview_url: false,
+          body: message
+        }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.ACCESS_TOKEN}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
     
-    res.status(200).json({ 
+    const whatsappMessageId = response.data.messages?.[0]?.id;
+    
+    // 2. Save to PostgreSQL database
+    const contact = await dbHelpers.findOrCreateContact(to);
+    const chat = await dbHelpers.findOrCreateChat(contact.id, to);
+    
+    const savedMessage = await dbHelpers.addMessage(chat.id, contact.id, {
+      type: 'sent',
+      content: message,
+      whatsappMessageId: whatsappMessageId,
+      timestamp: new Date(),
+      status: 'sent'
+    });
+    
+    console.log(`💾 Saved dashboard message to database: ${to}`);
+    
+    // 3. Forward to n8n
+    const n8nResult = await forwardToN8N({
+      phone: to,
+      content: message,
+      timestamp: new Date(),
+      contactName: contact.name,
+      messageId: whatsappMessageId,
+      type: 'sent',
+      contactId: contact.id,
+      chatId: chat.id
+    }, 'dashboard_outgoing');
+    
+    // 4. Store in memory for backward compatibility
+    if (!chats[to]) {
+      chats[to] = {
+        number: to,
+        name: contact.name || `+${to}`,
+        messages: [],
+        unread: 0,
+        lastMessage: new Date()
+      };
+    }
+    
+    chats[to].messages.push({
+      id: whatsappMessageId,
+      text: message,
+      timestamp: new Date(),
+      type: 'sent',
+      from: 'me'
+    });
+    
+    chats[to].lastMessage = new Date();
+    
+    // 5. Notify via Socket.IO
+    io.emit('message_sent', {
+      to: to,
+      message: message,
+      messageId: savedMessage.id,
+      whatsappMessageId: whatsappMessageId,
+      timestamp: new Date(),
+      n8nForwarded: n8nResult.success
+    });
+    
+    res.json({ 
       success: true, 
-      message: 'Simulated incoming message processed' 
+      data: response.data,
+      databaseId: savedMessage.id,
+      n8nForwarded: n8nResult.success,
+      message: 'Message sent successfully'
     });
     
   } catch (error) {
-    console.error('Error simulating message:', error);
+    console.error('❌ Send message error:', error.response?.data || error.message);
     res.status(500).json({ 
       success: false, 
-      error: error.message 
+      error: error.response?.data || error.message 
     });
   }
 });
-
-// Get n8n integration status
-app.get('/api/n8n/status', (req, res) => {
-  res.json({
-    n8nIntegration: true,
-    webhookUrl: process.env.N8N_WEBHOOK_URL || 'Not set',
-    apiKeyConfigured: !!process.env.N8N_API_KEY,
-    endpoints: {
-      receiveMessages: 'POST /api/n8n/messages',
-      simulateIncoming: 'POST /api/n8n/simulate-incoming',
-      status: 'GET /api/n8n/status'
-    },
-    timestamp: new Date().toISOString()
-  });
-});
-
-// ==================== API ENDPOINTS ====================
 
 // API: Get all chats (from database)
 app.get('/api/chats', async (req, res) => {
@@ -759,186 +831,22 @@ app.get('/api/chats/:number/messages', async (req, res) => {
   }
 });
 
-// API: Send message
-app.post('/api/send', async (req, res) => {
-  try {
-    const { to, message } = req.body;
-    
-    if (!to || !message) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing to or message field'
-      });
-    }
-    
-    // Send via WhatsApp API
-    const response = await axios.post(
-      `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to: to,
-        type: "text",
-        text: {
-          preview_url: false,
-          body: message
-        }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.ACCESS_TOKEN}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    
-    try {
-      // Save to PostgreSQL database
-      const contact = await dbHelpers.findOrCreateContact(to);
-      const chat = await dbHelpers.findOrCreateChat(contact.id, to);
-      
-      await dbHelpers.addMessage(chat.id, contact.id, {
-        type: 'sent',
-        content: message,
-        whatsappMessageId: response.data.messages[0].id,
-        timestamp: new Date(),
-        status: 'sent'
-      });
-      
-      console.log(`💾 Saved sent message to database: ${to}`);
-      
-    } catch (dbError) {
-      console.error('Error saving sent message to database:', dbError);
-      // Continue even if DB save fails
-    }
-    
-    // Also store in memory for backward compatibility
-    if (!chats[to]) {
-      chats[to] = {
-        number: to,
-        name: `+${to}`,
-        messages: [],
-        unread: 0,
-        lastMessage: new Date()
-      };
-    }
-    
-    chats[to].messages.push({
-      id: response.data.messages[0].id,
-      text: message,
-      timestamp: new Date(),
-      type: 'sent',
-      from: 'me'
-    });
-    
-    chats[to].lastMessage = new Date();
-    
-    // Notify via Socket.IO
-    io.emit('message_sent', {
-      to: to,
-      message: message
-    });
-    
-    res.json({ 
-      success: true, 
-      data: response.data,
-      message: 'Message sent successfully'
-    });
-    
-  } catch (error) {
-    console.error('❌ Send message error:', error.response?.data || error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: error.response?.data || error.message 
-    });
-  }
-});
-
-// ==================== DATABASE API ENDPOINTS ====================
-
-// Get all chats from database (direct endpoint)
-app.get('/api/db/chats', async (req, res) => {
-  try {
-    const chats = await dbHelpers.getAllChats();
-    res.json(chats);
-  } catch (error) {
-    console.error('Error fetching chats:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Get chat messages from database (direct endpoint)
-app.get('/api/db/chats/:phone/messages', async (req, res) => {
-  try {
-    const phone = req.params.phone;
-    
-    // Mark as read
-    await dbHelpers.markChatAsRead(phone);
-    
-    // Get messages
-    const messages = await dbHelpers.getChatMessages(phone);
-    
-    // Get contact info
-    const contactResult = await pool.query(
-      'SELECT * FROM contacts WHERE phone_number = $1',
-      [phone]
-    );
-    
-    res.json({
-      messages: messages,
-      contact: contactResult.rows[0] || null,
-      unreadCount: 0
-    });
-    
-  } catch (error) {
-    console.error('Error fetching messages:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Get all contacts from database
-app.get('/api/db/contacts', async (req, res) => {
-  try {
-    const contacts = await dbHelpers.getAllContacts();
-    res.json(contacts);
-  } catch (error) {
-    console.error('Error fetching contacts:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Update contact
-app.put('/api/db/contacts/:id', async (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    const updates = req.body;
-    
-    const updated = await dbHelpers.updateContact(id, updates);
-    
-    if (updated) {
-      res.json({ success: true, contact: updated });
-    } else {
-      res.status(404).json({ error: 'Contact not found' });
-    }
-  } catch (error) {
-    console.error('Error updating contact:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
 // ==================== UTILITY ENDPOINTS ====================
 
-// Ping endpoint for keeping service alive
+// Ping endpoint
 app.get('/ping', (req, res) => {
   res.json({
     status: 'pong',
     timestamp: new Date().toISOString(),
     service: 'WhatsApp Backend API',
     uptime: process.uptime(),
-    memory: process.memoryUsage(),
-    chats_count: Object.keys(chats).length,
+    n8nIntegration: {
+      enabled: true,
+      webhookUrl: N8N_WEBHOOK_URL,
+      status: 'active'
+    },
     database: 'PostgreSQL connected',
-    n8nIntegration: !!process.env.N8N_WEBHOOK_URL
+    chats_count: Object.keys(chats).length
   });
 });
 
@@ -948,17 +856,28 @@ app.get('/health', async (req, res) => {
     // Test database connection
     await pool.query('SELECT 1');
     
+    // Test n8n connection (optional)
+    let n8nStatus = 'not_tested';
+    try {
+      const testResponse = await axios.get(N8N_WEBHOOK_URL.replace('/webhook/whatsapp-hook', ''), {
+        timeout: 3000
+      });
+      n8nStatus = 'reachable';
+    } catch {
+      n8nStatus = 'webhook_only';
+    }
+    
     res.json({ 
       status: 'healthy',
       timestamp: new Date().toISOString(),
       service: 'WhatsApp Business API',
-      version: '2.0.0',
+      version: '2.1.0',
       environment: process.env.NODE_ENV || 'development',
       database: 'connected',
       n8nIntegration: {
-        enabled: !!process.env.N8N_WEBHOOK_URL,
-        webhookUrl: process.env.N8N_WEBHOOK_URL || 'Not configured',
-        apiKey: process.env.N8N_API_KEY ? 'Configured' : 'Not configured'
+        enabled: true,
+        webhookUrl: N8N_WEBHOOK_URL,
+        status: n8nStatus
       }
     });
   } catch (error) {
@@ -966,9 +885,14 @@ app.get('/health', async (req, res) => {
       status: 'degraded',
       timestamp: new Date().toISOString(),
       service: 'WhatsApp Business API',
-      version: '2.0.0',
+      version: '2.1.0',
       environment: process.env.NODE_ENV || 'development',
       database: 'disconnected',
+      n8nIntegration: {
+        enabled: true,
+        webhookUrl: N8N_WEBHOOK_URL,
+        status: 'active'
+      },
       warning: 'Database connection failed'
     });
   }
@@ -979,24 +903,25 @@ app.get('/', (req, res) => {
   res.json({
     service: 'WhatsApp Business API Backend',
     status: 'running',
-    version: '2.0.0',
+    version: '2.1.0',
     database: 'PostgreSQL',
+    n8nIntegration: {
+      url: N8N_WEBHOOK_URL,
+      status: 'active'
+    },
     features: [
       'Webhook handling',
       'Message storage in database',
       'Real-time updates',
       'Contact management',
       'Chat persistence',
-      'n8n Integration'
+      'n8n Integration (Dual-way)'
     ],
     endpoints: {
       webhook: '/webhook (GET/POST)',
       chats: '/api/chats (GET)',
-      'chats-db': '/api/db/chats (GET)',
       send: '/api/send (POST)',
-      contacts: '/api/db/contacts (GET)',
       'n8n-messages': '/api/n8n/messages (POST)',
-      'n8n-status': '/api/n8n/status (GET)',
       health: '/health (GET)',
       ping: '/ping (GET)'
     }
@@ -1006,6 +931,12 @@ app.get('/', (req, res) => {
 // Socket.IO connection handler
 io.on('connection', (socket) => {
   console.log('🔌 New client connected:', socket.id);
+  
+  socket.emit('connection_established', {
+    message: 'Connected to WhatsApp Backend',
+    n8nEnabled: true,
+    timestamp: new Date().toISOString()
+  });
   
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
@@ -1026,16 +957,20 @@ async function startServer() {
     await pool.query('SELECT 1');
     console.log('✅ PostgreSQL connection established');
     
+    console.log('🔄 n8n Integration Status:');
+    console.log(`   Webhook URL: ${N8N_WEBHOOK_URL}`);
+    console.log('   Direction: Dual-way (WhatsApp → n8n AND Dashboard → n8n)');
+    
     const PORT = process.env.PORT || 10000;
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 WhatsApp Backend Server started`);
       console.log(`📍 Port: ${PORT}`);
       console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`💾 Database: PostgreSQL connected`);
-      console.log(`🔄 n8n Integration: ${process.env.N8N_WEBHOOK_URL ? 'Enabled' : 'Disabled'}`);
+      console.log(`🔄 n8n Integration: ACTIVE`);
       console.log(`📞 Endpoint: http://localhost:${PORT}`);
-      console.log(`🔧 Ready to receive webhooks from WhatsApp`);
-      console.log(`🔗 n8n Endpoint: POST http://localhost:${PORT}/api/n8n/messages`);
+      console.log(`🔗 n8n Webhook: ${N8N_WEBHOOK_URL}`);
+      console.log(`📤 All messages will be forwarded to n8n`);
     });
     
   } catch (error) {
