@@ -1,4 +1,7 @@
 // n8n से messages receive करने के लिए नया endpoint
+
+const express = require('express');
+const router = express.Router();
 router.post('/api/n8n-messages', async (req, res) => {
   try {
     console.log('Received message from n8n:', req.body);
