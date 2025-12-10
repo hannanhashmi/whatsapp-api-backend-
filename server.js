@@ -11,10 +11,6 @@ require('dotenv').config();
 const app = express();
 const server = http.createServer(app);
 
-// 👉 ROUTES — yaha rakhna hota hai
-const messagesRoute = require('./routes/messages');
-app.use(messagesRoute);
-
 // PostgreSQL Connection Pool
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
