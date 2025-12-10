@@ -18,10 +18,10 @@ const PORT = process.env.PORT || 10000;
 
 // ==================== MIDDLEWARE ====================
 app.use(cors({ origin: "*", credentials: true }));
-app.use(bodyParser.json());           // parse JSON bodies
+app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// ============= PostgreSQL Pool (optional) =============
+// ============= PostgreSQL Pool =============
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || null,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
@@ -32,9 +32,14 @@ const pool = new Pool({
 
 // ==================== DB INITIALIZATION ====================
 async function initializeDatabase() {
-  if (!pool) return console.log('⚠️ No database configured (DATABASE_URL missing). Skipping DB init.');
+  if (!pool) {
+    console.log("⚠️ No database configured. Skipping DB init.");
+    return;
+  }
+
   try {
-    console.log('📊 Initializing PostgreSQL database...');
+    console.log("📊 Initializing PostgreSQL database...");
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS contacts (
         id SERIAL PRIMARY KEY,
@@ -72,25 +77,19 @@ async function initializeDatabase() {
         id SERIAL PRIMARY KEY,
         chat_id INTEGER REFERENCES chats(id) ON DELETE CASCADE,
         contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE,
-        message_type VARCHAR(10) NOT NULL CHECK (message_type IN ('received', 'sent')),
+        message_type VARCHAR(10) NOT NULL CHECK (message_type IN ('received','sent')),
         content TEXT NOT NULL,
         whatsapp_message_id VARCHAR(200),
-        status VARCHAR(20) DEFAULT 'sent' CHECK (status IN ('sent','delivered','read','failed')),
+        status VARCHAR(20) DEFAULT 'sent',
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone_number);
-      CREATE INDEX IF NOT EXISTS idx_chats_phone ON chats(phone_number);
-      CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);
-    `);
+    console.log("✅ Database ready.");
 
-    console.log('✅ Database tables created/verified successfully');
   } catch (err) {
-    console.error('❌ Database initialization error:', err);
-    throw err;
+    console.error("❌ DB init error:", err);
   }
 }
 
@@ -137,7 +136,6 @@ const dbHelpers = {
 
   async addMessage(chatId, contactId, messageData) {
     if (!pool) {
-      // If no DB, return a mock saved object
       return {
         id: `mock-${Date.now()}`,
         chat_id: chatId,
@@ -274,14 +272,9 @@ io.on('connection', (socket) => {
 });
 
 // ==================== Core Message Processor ====================
-/**
- * processIncomingMessage(message, metaPayload)
- * message - an object representing a WhatsApp message (as from Meta)
- * metaPayload - full webhook payload (optional)
- */
 async function processIncomingMessage(message, metaPayload = null) {
   try {
-    const phone = message.from || message.from || message.from;
+    const phone = message.from;
     const content = message.text?.body || message.body?.text || '[Media/File Message]';
     const timestamp = message.timestamp ? new Date(message.timestamp * 1000) : new Date();
 
@@ -431,7 +424,6 @@ app.post('/webhook', async (req, res) => {
         for (const change of entry.changes || []) {
           if (change.field === 'messages' && change.value?.messages) {
             for (const message of change.value.messages) {
-              // process each message
               await processIncomingMessage(message, body);
             }
           }
@@ -626,7 +618,6 @@ app.get('/health', async (req, res) => {
     if (pool) await pool.query('SELECT 1');
     let n8nStatus = 'not_tested';
     try {
-      // check base of n8n webhook domain
       const base = N8N_WEBHOOK_URL.replace(/\/webhook\/.*$/, '/');
       await axios.get(base, { timeout: 3000 });
       n8nStatus = 'reachable';
@@ -668,3 +659,7 @@ async function startServer() {
   }
 }
 startServer();
+
+
+
+
