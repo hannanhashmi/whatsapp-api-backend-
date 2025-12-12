@@ -470,107 +470,94 @@ app.post('/webhook', async (req, res) => {
 
 
 // Process incoming WhatsApp message
-async function processIncomingMessage(message, metaPayload = null) {
-  const phone = message.from;
-  const timestamp = new Date(message.timestamp * 1000);
-
-  let content = '[Unsupported Message]';
-  let mediaUrl = null;
-
-  // 1️⃣ MEDIA + TEXT HANDLING
-  if (message.type === 'image' && message.image) {
-    mediaUrl = message.image?.link;
-    content = `[Image] ${mediaUrl}`;
-  } 
-  else if (message.type === 'audio' && message.audio) {
-    mediaUrl = message.audio?.link;
-    content = `[Audio] ${mediaUrl}`;
-  }
-  else if (message.type === 'video' && message.video) {
-    mediaUrl = message.video?.link;
-    content = `[Video] ${mediaUrl}`;
-  }
-  else if (message.type === 'document' && message.document) {
-    mediaUrl = message.document?.link;
-    content = `[Document] ${mediaUrl}`;
-  }
-  else if (message.type === 'sticker' && message.sticker) {
-    mediaUrl = message.sticker?.link;
-    content = `[Sticker] ${mediaUrl}`;
-  }
-  else if (message.text?.body) {
-    content = message.text.body;
-  }
-
-  console.log(`💬 Incoming message from ${phone}: ${content}`);
-
+async function processIncomingMessage(message) {
   try {
-    // 2️⃣ SAVE TO DATABASE
-    const contact = await dbHelpers.findOrCreateContact(phone);
-    const chat = await dbHelpers.findOrCreateChat(contact.id, phone);
+    const from = message.from;
+    const type = message.type;
+    let content = "";
+    let media_url = null;
+    let media_type = null;
+    let media_caption = null;
 
-    const savedMessage = await dbHelpers.addMessage(chat.id, contact.id, {
-      type: 'received',
-      content,
-      mediaUrl,
-      whatsappMessageId: message.id,
-      timestamp,
-      status: 'delivered'
-    });
-
-    // 3️⃣ FORWARD TO N8N
-    const n8nForwardResult = await forwardToN8N({
-      phone,
-      content,
-      mediaUrl,
-      timestamp,
-      contactName: contact.name,
-      messageId: message.id,
-      type: 'received',
-      contactId: contact.id,
-      chatId: chat.id,
-      metaPayload
-    }, 'whatsapp_incoming');
-
-    // 4️⃣ MEMORY STORAGE FOR UI
-    if (!chats[phone]) {
-      chats[phone] = {
-        number: phone,
-        name: contact.name || phone,
-        messages: [],
-        unread: 0,
-        lastMessage: timestamp
-      };
+    // TEXT MESSAGE
+    if (type === "text") {
+      content = message.text.body;
     }
 
-    chats[phone].messages.push({
-      id: message.id,
-      text: content,
-      mediaUrl,
-      timestamp,
-      type: 'received',
-      from: phone
-    });
+    // IMAGE MESSAGE
+    else if (type === "image") {
+      media_type = "image";
+      media_url = message.image?.url || null;
+      media_caption = message.image?.caption || null;
+      content = "[Image]";
+    }
 
-    chats[phone].lastMessage = timestamp;
-    chats[phone].unread++;
+    // VIDEO MESSAGE
+    else if (type === "video") {
+      media_type = "video";
+      media_url = message.video?.url || null;
+      media_caption = message.video?.caption || null;
+      content = "[Video]";
+    }
 
-    // 5️⃣ SOCKET UPDATE TO DASHBOARD
-    io.emit('new_message', {
-      from: phone,
-      message: content,
-      mediaUrl,
-      timestamp,
-      contactName: contact.name,
-      messageId: savedMessage.id,
-      source: 'whatsapp',
-      n8nForwarded: n8nForwardResult.success
-    });
+    // AUDIO MESSAGE
+    else if (type === "audio") {
+      media_type = "audio";
+      media_url = message.audio?.url || null;
+      content = "[Audio]";
+    }
 
-    console.log("✅ Message saved + forwarded + broadcasted");
+    // DOCUMENT MESSAGE
+    else if (type === "document") {
+      media_type = "document";
+      media_url = message.document?.url || null;
+      media_caption = message.document?.caption || null;
+      content = "[Document]";
+    }
 
-  } catch (error) {
-    console.error("❌ Error processing WhatsApp message:", error);
+    // FALLBACK
+    else {
+      content = `[Unsupported Message: ${type}]`;
+    }
+
+    // 1️⃣ FIND OR CREATE CONTACT
+    const contact = await findOrCreateContact(from);
+
+    // 2️⃣ FIND OR CREATE CHAT
+    const chat = await findOrCreateChat(contact.id, from);
+
+    // 3️⃣ SAVE MESSAGE IN DB  (MEDIA FIELDS INCLUDED)
+    await db.query(
+      `INSERT INTO messages 
+        (chat_id, contact_id, message_type, content, media_url, media_type, media_caption, whatsapp_message_id, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        chat.id,
+        contact.id,
+        "received",
+        content,
+        media_url,
+        media_type,
+        media_caption,
+        message.id,
+        "delivered"
+      ]
+    );
+
+    // 4️⃣ UPDATE LAST MESSAGE IN CHAT
+    await db.query(
+      `UPDATE chats 
+       SET last_message=$1, last_message_at=NOW(), unread_count = unread_count + 1 
+       WHERE id=$2`,
+      [content, chat.id]
+    );
+
+    console.log("📥 Incoming message saved:", content);
+
+    return true;
+  } catch (err) {
+    console.error("❌ processIncomingMessage error:", err);
+    return false;
   }
 }
 
