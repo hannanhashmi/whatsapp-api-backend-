@@ -468,6 +468,49 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
+
+
+
+// Detect media messages before setting content
+let content = '[Media/File Message]';
+let mediaUrl = null;
+
+// Image
+if (message.type === 'image' && message.image) {
+  mediaUrl = message.image?.link || null;
+  content = `[Image] ${mediaUrl}`;
+}
+
+// Audio
+else if (message.type === 'audio' && message.audio) {
+  mediaUrl = message.audio?.link || null;
+  content = `[Audio] ${mediaUrl}`;
+}
+
+// Video
+else if (message.type === 'video' && message.video) {
+  mediaUrl = message.video?.link || null;
+  content = `[Video] ${mediaUrl}`;
+}
+
+// Document
+else if (message.type === 'document' && message.document) {
+  mediaUrl = message.document?.link || null;
+  content = `[Document] ${mediaUrl}`;
+}
+
+// Sticker
+else if (message.type === 'sticker' && message.sticker) {
+  mediaUrl = message.sticker?.link || null;
+  content = `[Sticker] ${mediaUrl}`;
+}
+
+// Text fallback
+else if (message.text?.body) {
+  content = message.text.body;
+}
+
+
 // Process incoming WhatsApp message
 async function processIncomingMessage(message, metaPayload = null) {
   const phone = message.from;
