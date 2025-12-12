@@ -1,73 +1,59 @@
-const express = require("express");
+// n8n से messages receive करने के लिए नया endpoint
+
+const express = require('express');
 const router = express.Router();
-const { processIncomingMessage, processOutgoingMessage } = require("../controllers/messageController");
-
-/* ---------------------------
-   MAIN META WEBHOOK HANDLER
----------------------------- */
-router.post("/webhook", async (req, res) => {
+router.post('/api/n8n-messages', async (req, res) => {
   try {
-    console.log("📩 Incoming Meta Webhook:", JSON.stringify(req.body, null, 2));
-
-    if (!req.body.entry || !req.body.entry[0].changes) {
-      console.log("❌ Invalid Meta Payload");
-      return res.sendStatus(200);
-    }
-
-    const change = req.body.entry[0].changes[0];
-    const value = change.value;
-
-    if (!value.messages || !value.messages[0]) {
-      console.log("⚠ No message detected");
-      return res.sendStatus(200);
-    }
-
-    const msg = value.messages[0];
-    const from = msg.from;
-
-    // Build standard object format for processing
-    const messageData = {
-      id: msg.id,
-      from: from,
-      timestamp: msg.timestamp,
-      type: msg.type,
-      text: msg.text,
-      image: msg.image,
-      audio: msg.audio,
-      video: msg.video,
-      document: msg.document,
-      sticker: msg.sticker
+    console.log('Received message from n8n:', req.body);
+    
+    const { message, from, to, timestamp, messageId, direction = 'outgoing' } = req.body;
+    
+    // Format को Meta webhook format में convert करें
+    const metaFormat = {
+      object: 'whatsapp_business_account',
+      entry: [{
+        id: 'n8n-entry',
+        changes: [{
+          value: {
+            messaging_product: 'whatsapp',
+            metadata: {
+              display_phone_number: to || from,
+              phone_number_id: process.env.PHONE_NUMBER_ID || 'n8n-phone-id'
+            },
+            contacts: [{
+              profile: {
+                name: 'User'
+              },
+              wa_id: from
+            }],
+            messages: [{
+              from: from,
+              id: messageId || `n8n-${Date.now()}`,
+              timestamp: timestamp || Math.floor(Date.now() / 1000),
+              type: 'text',
+              text: {
+                body: message
+              }
+            }]
+          },
+          field: 'messages'
+        }]
+      }]
     };
-
-    // CALL MAIN PROCESSOR
-    await processIncomingMessage(messageData);
-
-    return res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ Webhook Processing Error:", err);
-    return res.sendStatus(500);
-  }
-});
-
-
-/* ---------------------------
-   n8n OUTGOING MESSAGE HANDLER
----------------------------- */
-router.post("/n8n-messages", async (req, res) => {
-  try {
-    console.log("📤 Received Outgoing Message from n8n:", req.body);
-
-    const saved = await processOutgoingMessage(req.body);
-
-    return res.status(200).json({
-      success: saved,
-      message: saved ? "Message saved" : "Failed saving"
+    
+    // आपके existing processWebhook function को call करें
+    await processWebhook(metaFormat);
+    
+    res.status(200).json({ 
+      success: true, 
+      message: 'Message processed successfully' 
     });
-
-  } catch (err) {
-    console.error("❌ Error saving outgoing:", err);
-    return res.status(500).json({ success: false });
+    
+  } catch (error) {
+    console.error('Error processing n8n message:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
   }
 });
-
-module.exports = router;
