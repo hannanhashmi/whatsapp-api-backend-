@@ -475,76 +475,31 @@ async function processIncomingMessage(message) {
     const from = message.from;
     const type = message.type;
     let content = "";
-    let media_url = null;
-    let media_type = null;
-    let media_caption = null;
 
     // TEXT MESSAGE
     if (type === "text") {
       content = message.text.body;
     }
 
-    // IMAGE MESSAGE
-    else if (type === "image") {
-      media_type = "image";
-      media_url = message.image?.url || null;
-      media_caption = message.image?.caption || null;
-      content = "[Image]";
-    }
-
-    // VIDEO MESSAGE
-    else if (type === "video") {
-      media_type = "video";
-      media_url = message.video?.url || null;
-      media_caption = message.video?.caption || null;
-      content = "[Video]";
-    }
-
-    // AUDIO MESSAGE
-    else if (type === "audio") {
-      media_type = "audio";
-      media_url = message.audio?.url || null;
-      content = "[Audio]";
-    }
-
-    // DOCUMENT MESSAGE
-    else if (type === "document") {
-      media_type = "document";
-      media_url = message.document?.url || null;
-      media_caption = message.document?.caption || null;
-      content = "[Document]";
-    }
-
-    // FALLBACK
+    // MEDIA (IMAGE / VIDEO / AUDIO / DOCUMENT / STICKER)
     else {
-      content = `[Unsupported Message: ${type}]`;
+      content = `[${type.toUpperCase()} Message]`;
     }
 
-    // 1️⃣ FIND OR CREATE CONTACT
-    const contact = await findOrCreateContact(from);
+    // 1️⃣ Correct helpers (YOUR MAIN BUG FIX)
+    const contact = await dbHelpers.findOrCreateContact(from);
+    const chat = await dbHelpers.findOrCreateChat(contact.id, from);
 
-    // 2️⃣ FIND OR CREATE CHAT
-    const chat = await findOrCreateChat(contact.id, from);
+    // 2️⃣ Save message in DB (NO MEDIA FIELDS – your DB does NOT support them)
+    const savedMessage = await dbHelpers.addMessage(chat.id, contact.id, {
+      type: "received",
+      content: content,
+      whatsappMessageId: message.id,
+      timestamp: new Date(),
+      status: "delivered"
+    });
 
-    // 3️⃣ SAVE MESSAGE IN DB  (MEDIA FIELDS INCLUDED)
-    await db.query(
-      `INSERT INTO messages 
-        (chat_id, contact_id, message_type, content, media_url, media_type, media_caption, whatsapp_message_id, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [
-        chat.id,
-        contact.id,
-        "received",
-        content,
-        media_url,
-        media_type,
-        media_caption,
-        message.id,
-        "delivered"
-      ]
-    );
-
-    // 4️⃣ UPDATE LAST MESSAGE IN CHAT
+    // 3️⃣ Update chat
     await db.query(
       `UPDATE chats 
        SET last_message=$1, last_message_at=NOW(), unread_count = unread_count + 1 
@@ -554,12 +509,23 @@ async function processIncomingMessage(message) {
 
     console.log("📥 Incoming message saved:", content);
 
+    // 4️⃣ Emit to dashboard
+    io.emit("new_message", {
+      from,
+      message: content,
+      type: "received",
+      timestamp: new Date(),
+      messageId: savedMessage.id
+    });
+
     return true;
+
   } catch (err) {
-    console.error("❌ processIncomingMessage error:", err);
+    console.error("❌ processIncomingMessage ERROR:", err);
     return false;
   }
 }
+
 
 
 
