@@ -469,128 +469,112 @@ app.post('/webhook', async (req, res) => {
 });
 
 
-
-
-// Detect media messages before setting content
-let content = '[Media/File Message]';
-let mediaUrl = null;
-
-// Image
-if (message.type === 'image' && message.image) {
-  mediaUrl = message.image?.link || null;
-  content = `[Image] ${mediaUrl}`;
-}
-
-// Audio
-else if (message.type === 'audio' && message.audio) {
-  mediaUrl = message.audio?.link || null;
-  content = `[Audio] ${mediaUrl}`;
-}
-
-// Video
-else if (message.type === 'video' && message.video) {
-  mediaUrl = message.video?.link || null;
-  content = `[Video] ${mediaUrl}`;
-}
-
-// Document
-else if (message.type === 'document' && message.document) {
-  mediaUrl = message.document?.link || null;
-  content = `[Document] ${mediaUrl}`;
-}
-
-// Sticker
-else if (message.type === 'sticker' && message.sticker) {
-  mediaUrl = message.sticker?.link || null;
-  content = `[Sticker] ${mediaUrl}`;
-}
-
-// Text fallback
-else if (message.text?.body) {
-  content = message.text.body;
-}
-
-
 // Process incoming WhatsApp message
 async function processIncomingMessage(message, metaPayload = null) {
   const phone = message.from;
-  const content = message.text?.body || '[Media/File Message]';
   const timestamp = new Date(message.timestamp * 1000);
-  
-  console.log(`💬 Processing WhatsApp message from ${phone}: ${content.substring(0, 50)}...`);
-  
+
+  let content = '[Unsupported Message]';
+  let mediaUrl = null;
+
+  // 1️⃣ MEDIA + TEXT HANDLING
+  if (message.type === 'image' && message.image) {
+    mediaUrl = message.image?.link;
+    content = `[Image] ${mediaUrl}`;
+  } 
+  else if (message.type === 'audio' && message.audio) {
+    mediaUrl = message.audio?.link;
+    content = `[Audio] ${mediaUrl}`;
+  }
+  else if (message.type === 'video' && message.video) {
+    mediaUrl = message.video?.link;
+    content = `[Video] ${mediaUrl}`;
+  }
+  else if (message.type === 'document' && message.document) {
+    mediaUrl = message.document?.link;
+    content = `[Document] ${mediaUrl}`;
+  }
+  else if (message.type === 'sticker' && message.sticker) {
+    mediaUrl = message.sticker?.link;
+    content = `[Sticker] ${mediaUrl}`;
+  }
+  else if (message.text?.body) {
+    content = message.text.body;
+  }
+
+  console.log(`💬 Incoming message from ${phone}: ${content}`);
+
   try {
-    // 1. Save to PostgreSQL database
+    // 2️⃣ SAVE TO DATABASE
     const contact = await dbHelpers.findOrCreateContact(phone);
     const chat = await dbHelpers.findOrCreateChat(contact.id, phone);
-    
+
     const savedMessage = await dbHelpers.addMessage(chat.id, contact.id, {
       type: 'received',
-      content: content,
+      content,
+      mediaUrl,
       whatsappMessageId: message.id,
-      timestamp: timestamp,
+      timestamp,
       status: 'delivered'
     });
 
-    // 2. Forward to n8n IMMEDIATELY
+    // 3️⃣ FORWARD TO N8N
     const n8nForwardResult = await forwardToN8N({
-      phone: phone,
-      content: content,
-      timestamp: timestamp,
+      phone,
+      content,
+      mediaUrl,
+      timestamp,
       contactName: contact.name,
       messageId: message.id,
       type: 'received',
       contactId: contact.id,
       chatId: chat.id,
-      metaPayload: metaPayload // Pass full Meta payload
+      metaPayload
     }, 'whatsapp_incoming');
-    
-    // Log n8n forwarding result
-    if (n8nForwardResult.success) {
-      console.log("✅ WhatsApp message forwarded to n8n successfully");
-    } else {
-      console.log("⚠️ WhatsApp message saved but n8n forwarding failed");
-    }
-    
-    // 3. Store in memory for backward compatibility
+
+    // 4️⃣ MEMORY STORAGE FOR UI
     if (!chats[phone]) {
       chats[phone] = {
         number: phone,
-        name: contact.name || `+${phone}`,
+        name: contact.name || phone,
         messages: [],
         unread: 0,
         lastMessage: timestamp
       };
     }
-    
+
     chats[phone].messages.push({
       id: message.id,
       text: content,
-      timestamp: timestamp,
+      mediaUrl,
+      timestamp,
       type: 'received',
       from: phone
     });
-    
+
     chats[phone].lastMessage = timestamp;
     chats[phone].unread++;
-    
-    // 4. Notify connected clients via Socket.IO
+
+    // 5️⃣ SOCKET UPDATE TO DASHBOARD
     io.emit('new_message', {
       from: phone,
       message: content,
-      timestamp: timestamp,
+      mediaUrl,
+      timestamp,
       contactName: contact.name,
       messageId: savedMessage.id,
       source: 'whatsapp',
       n8nForwarded: n8nForwardResult.success
     });
-    
-    console.log(`💾 Saved WhatsApp message to database and forwarded to n8n: ${phone}`);
-    
+
+    console.log("✅ Message saved + forwarded + broadcasted");
+
   } catch (error) {
-    console.error('Error processing incoming WhatsApp message:', error);
+    console.error("❌ Error processing WhatsApp message:", error);
   }
 }
+
+
 
 // ==================== N8N INTEGRATION ENDPOINTS ====================
 
