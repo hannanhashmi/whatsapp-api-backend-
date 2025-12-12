@@ -1,33 +1,36 @@
-// routes/messages.js
 const express = require('express');
 const router = express.Router();
-const { processWebhook } = require('../server'); // Adjust path as per your project
-const { io } = require('../server'); // Socket.IO instance
+const { processIncomingMessage } = require('../controllers/messageController');
 
-// ==================== n8n Messages Endpoint ====================
-// Receive messages from n8n (Issue 3 & 4 fixes included)
+// -------------------- WhatsApp Webhook --------------------
+router.post('/webhook', async (req, res) => {
+  try {
+    const body = req.body;
+
+    if (body.object === 'whatsapp_business_account') {
+      for (const entry of body.entry) {
+        for (const change of entry.changes) {
+          if (change.field === 'messages' && change.value.messages) {
+            const message = change.value.messages[0];
+            await processIncomingMessage(message, body);
+          }
+        }
+      }
+      res.status(200).send('EVENT_RECEIVED');
+    } else {
+      res.sendStatus(404);
+    }
+  } catch (error) {
+    console.error('❌ Webhook processing error:', error);
+    res.sendStatus(500);
+  }
+});
+
+// -------------------- n8n Messages Endpoint --------------------
 router.post('/api/n8n-messages', async (req, res) => {
   try {
-    console.log('📩 Received message from n8n:', req.body);
+    const { message, from, to, timestamp, messageId } = req.body;
 
-    const {
-      message,
-      from,
-      to,
-      timestamp,
-      messageId,
-      direction = 'outgoing',
-      contactName = 'User'
-    } = req.body;
-
-    if (!message || (!from && !to)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: message and from/to'
-      });
-    }
-
-    // Convert to Meta webhook format
     const metaFormat = {
       object: 'whatsapp_business_account',
       entry: [{
@@ -39,20 +42,13 @@ router.post('/api/n8n-messages', async (req, res) => {
               display_phone_number: to || from,
               phone_number_id: process.env.PHONE_NUMBER_ID || 'n8n-phone-id'
             },
-            contacts: [{
-              profile: {
-                name: contactName
-              },
-              wa_id: from
-            }],
+            contacts: [{ profile: { name: 'User' }, wa_id: from }],
             messages: [{
-              from: from,
+              from,
               id: messageId || `n8n-${Date.now()}`,
               timestamp: timestamp || Math.floor(Date.now() / 1000),
               type: 'text',
-              text: {
-                body: message
-              }
+              text: { body: message }
             }]
           },
           field: 'messages'
@@ -60,35 +56,12 @@ router.post('/api/n8n-messages', async (req, res) => {
       }]
     };
 
-    // Call your existing processWebhook function
-    const processedMessage = await processWebhook(metaFormat);
+    await processIncomingMessage(metaFormat.entry[0].changes[0].value.messages[0], metaFormat);
 
-    // ==================== SOCKET.IO EMIT (ISSUE 4 FIX) ====================
-    // Send event to dashboard/clients
-    io.emit('new_message', {
-      from: from,
-      to: to,
-      message: message,
-      messageId: messageId || `n8n-${Date.now()}`,
-      timestamp: new Date(timestamp * 1000) || new Date(),
-      source: 'n8n',
-      direction: direction,
-      contactName: contactName,
-      n8nForwarded: true
-    });
-
-    // Respond success
-    res.status(200).json({
-      success: true,
-      message: 'Message processed and broadcasted successfully'
-    });
-
+    res.status(200).json({ success: true, message: 'Message processed successfully' });
   } catch (error) {
     console.error('❌ Error processing n8n message:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
