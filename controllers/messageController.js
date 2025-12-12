@@ -1,142 +1,152 @@
-const db = require('../db'); // PostgreSQL pool & helpers
-const { io, forwardToN8N } = require('../server');
+const db = require("../config/db");
+const { io } = require("../server");
 
-// -------------------- Incoming WhatsApp Message --------------------
-async function processIncomingMessage(message, metaPayload = null) {
+/* --------------------------------------
+   1) Detect Message Type + Extract Text
+--------------------------------------- */
+function extractMessageContent(msg) {
+  let content = "[Media/File Message]";
+  let mediaUrl = null;
+
+  if (msg.type === "text" && msg.text?.body) {
+    content = msg.text.body;
+  }
+  else if (msg.type === "image" && msg.image?.link) {
+    mediaUrl = msg.image.link;
+    content = `[Image] ${mediaUrl}`;
+  }
+  else if (msg.type === "audio" && msg.audio?.link) {
+    mediaUrl = msg.audio.link;
+    content = `[Audio] ${mediaUrl}`;
+  }
+  else if (msg.type === "video" && msg.video?.link) {
+    mediaUrl = msg.video.link;
+    content = `[Video] ${mediaUrl}`;
+  }
+  else if (msg.type === "document" && msg.document?.link) {
+    mediaUrl = msg.document.link;
+    content = `[Document] ${mediaUrl}`;
+  }
+  else if (msg.type === "sticker" && msg.sticker?.link) {
+    mediaUrl = msg.sticker.link;
+    content = `[Sticker] ${mediaUrl}`;
+  }
+
+  return { content, mediaUrl };
+}
+
+/* --------------------------------------
+   2) Incoming Message Handler
+--------------------------------------- */
+async function processIncomingMessage(msg) {
   try {
-    const phone = message.from;
-    const timestamp = new Date(message.timestamp * 1000);
+    console.log("📥 Incoming Message:", msg);
 
-    let content = '[Unsupported Message]';
-    let mediaUrl = null;
+    const phone = msg.from;
+    const timestamp = new Date(msg.timestamp * 1000);
 
-    // Media + Text handling
-    if (message.type === 'image' && message.image) {
-      mediaUrl = message.image?.link;
-      content = `[Image] ${mediaUrl}`;
-    } else if (message.type === 'audio' && message.audio) {
-      mediaUrl = message.audio?.link;
-      content = `[Audio] ${mediaUrl}`;
-    } else if (message.type === 'video' && message.video) {
-      mediaUrl = message.video?.link;
-      content = `[Video] ${mediaUrl}`;
-    } else if (message.type === 'document' && message.document) {
-      mediaUrl = message.document?.link;
-      content = `[Document] ${mediaUrl}`;
-    } else if (message.type === 'sticker' && message.sticker) {
-      mediaUrl = message.sticker?.link;
-      content = `[Sticker] ${mediaUrl}`;
-    } else if (message.text?.body) {
-      content = message.text.body;
-    }
+    // Extract content
+    const { content, mediaUrl } = extractMessageContent(msg);
 
-    // Ensure contact exists
+    // 1️⃣ Ensure Contact Exists
     const contact = await db.findOrCreateContact(phone);
 
-    // Ensure chat exists
+    // 2️⃣ Ensure Chat Exists
     const chat = await db.findOrCreateChat(contact.id, phone);
 
-    // Save message
-    const savedMessage = await db.addMessage(chat.id, contact.id, {
-      type: 'received',
-      content,
-      mediaUrl,
-      whatsappMessageId: message.id,
-      timestamp,
-      status: 'delivered'
+    // 3️⃣ Save Incoming Message
+    const saved = await db.addMessage(chat.id, contact.id, {
+      type: "received",
+      content: content,
+      media_url: mediaUrl,
+      media_type: mediaUrl ? msg.type : null,
+      whatsappMessageId: msg.id,
+      timestamp: timestamp,
+      status: "delivered"
     });
 
-    // Forward to n8n
-    const n8nResult = await forwardToN8N({
-      phone,
-      content,
-      mediaUrl,
-      timestamp,
-      contactName: contact.name,
-      messageId: message.id,
-      type: 'received',
-      contactId: contact.id,
-      chatId: chat.id,
-      metaPayload
-    }, 'whatsapp_incoming');
+    console.log("💾 Saved Incoming Message:", saved.id);
 
-    // Emit to dashboard via Socket.IO
-    io.emit('new_message', {
+    // 4️⃣ SOCKET.IO → Send to Dashboard
+    io.emit("new_message", {
       from: phone,
       message: content,
       mediaUrl,
+      type: "received",
       timestamp,
       contactName: contact.name,
-      messageId: savedMessage.id,
-      source: 'whatsapp',
-      n8nForwarded: n8nResult.success
+      messageId: saved.id,
+      source: "whatsapp"
     });
 
-    console.log(`✅ Incoming message processed: ${content}`);
+    console.log("📡 Dashboard Updated via Socket.io");
+    return true;
 
-  } catch (error) {
-    console.error('❌ processIncomingMessage error:', error);
+  } catch (err) {
+    console.error("❌ processIncomingMessage ERROR:", err);
+    return false;
   }
 }
 
-// -------------------- Outgoing Message --------------------
+
+/* --------------------------------------
+   3) Outgoing Message Handler (from n8n)
+--------------------------------------- */
 async function processOutgoingMessage(data) {
   try {
+    console.log("📤 Saving Outgoing Message:", data);
+
     const to = data.to;
     const content = data.message || "[Media]";
     const media_url = data.mediaUrl || null;
     const media_type = media_url ? "media" : null;
-    const whatsapp_message_id = data.wa_id || null;
 
-    // Ensure Contact Exists
+    // 1️⃣ Ensure Contact Exists
     const contact = await db.findOrCreateContact(to);
 
-    // Ensure Chat Exists
+    // 2️⃣ Ensure Chat Exists
     const chat = await db.findOrCreateChat(contact.id, to);
 
-    // Save Outgoing Message
-    const savedMessage = await db.addMessage(chat.id, contact.id, {
-      type: 'sent',
-      content,
-      mediaUrl: media_url,
-      mediaType: media_type,
-      whatsappMessageId: whatsapp_message_id,
-      status: 'sent',
-      timestamp: new Date()
-    });
+    // 3️⃣ Save Outgoing Message
+    const saved = await db.query(
+      `INSERT INTO messages 
+        (chat_id, contact_id, message_type, content, media_url, media_type, whatsapp_message_id, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       RETURNING id`,
+      [
+        chat.id,
+        contact.id,
+        "sent",
+        content,
+        media_url,
+        media_type,
+        data.messageId || null,
+        "sent"
+      ]
+    );
 
-    // Update Chat Last Message
-    await db.updateChatLastMessage(chat.id, content);
+    // 4️⃣ Update Chat Last Message
+    await db.query(
+      `UPDATE chats SET last_message=$1, last_message_at=NOW() WHERE id=$2`,
+      [content, chat.id]
+    );
 
-    // Forward to n8n
-    await forwardToN8N({
-      phone: to,
-      content,
-      mediaUrl: media_url,
-      timestamp: new Date(),
-      contactName: contact.name,
-      messageId: whatsapp_message_id,
-      type: 'sent',
-      contactId: contact.id,
-      chatId: chat.id
-    }, 'dashboard_outgoing');
-
-    // Emit via Socket.IO
-    io.emit('new_message', {
-      from: 'me',
-      to,
+    // 5️⃣ Socket Emit (Dashboard)
+    io.emit("new_message", {
+      from: to,
       message: content,
+      type: "sent",
       mediaUrl: media_url,
       timestamp: new Date(),
-      messageId: whatsapp_message_id,
-      source: 'dashboard',
-      n8nForwarded: true
+      messageId: saved.rows[0].id,
+      source: "n8n"
     });
 
-    console.log("📤 Outgoing message saved and forwarded:", content);
+    console.log("📡 Dashboard Updated From Outgoing Message");
     return true;
+
   } catch (err) {
-    console.error("❌ processOutgoingMessage error:", err);
+    console.error("❌ processOutgoingMessage ERROR:", err);
     return false;
   }
 }
