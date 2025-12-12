@@ -5,7 +5,7 @@ require('dotenv').config();
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  max: 10, // Maximum number of clients in the pool
+  max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
 });
@@ -64,6 +64,9 @@ async function initializeDatabase() {
         contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE,
         message_type VARCHAR(10) NOT NULL CHECK (message_type IN ('received', 'sent')),
         content TEXT NOT NULL,
+        media_url TEXT,
+        media_type VARCHAR(50),
+        media_caption TEXT,
         whatsapp_message_id VARCHAR(100),
         status VARCHAR(20) DEFAULT 'sent' CHECK (status IN ('sent', 'delivered', 'read', 'failed')),
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -71,7 +74,7 @@ async function initializeDatabase() {
       )
     `);
 
-    // Create indexes for performance
+    // Indexes
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone_number);
       CREATE INDEX IF NOT EXISTS idx_chats_phone ON chats(phone_number);
@@ -80,7 +83,7 @@ async function initializeDatabase() {
       CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp DESC);
     `);
 
-    console.log('✅ Database tables created/verified');
+    console.log('✅ Database tables created/verified (Media fields added)');
   } catch (error) {
     console.error('❌ Database initialization error:', error);
   }
@@ -91,3 +94,4 @@ module.exports = {
   initializeDatabase,
   query: (text, params) => pool.query(text, params)
 };
+
