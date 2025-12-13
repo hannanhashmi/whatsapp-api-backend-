@@ -2,7 +2,7 @@
 const { Pool } = require('pg');
 const express = require('express');
 const bodyParser = require('body-parser');
-const axios = require('axios'); // ✅ axios already included
+const axios = require('axios');
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
@@ -29,18 +29,16 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// N8N Webhook URL - आपका URL
+// N8N Webhook URL
 const N8N_WEBHOOK_URL = "https://xibado3.app.n8n.cloud/webhook/whatsapp";
 
 // API Key Middleware for n8n
 const verifyN8nApiKey = (req, res, next) => {
-  // Skip for public endpoints
   const publicPaths = ['/', '/ping', '/health', '/webhook', '/api/chats', '/api/send'];
   if (publicPaths.includes(req.path)) {
     return next();
   }
   
-  // For n8n endpoints
   if (req.path.startsWith('/api/n8n')) {
     const apiKey = req.headers['authorization']?.replace('Bearer ', '');
     const secretKey = req.headers['x-n8n-secret'];
@@ -78,61 +76,57 @@ function getFileExtension(mimeType, filename = '') {
     'application/vnd.ms-excel': 'xls'
   };
   
-  // First try to get extension from filename
   if (filename) {
     const ext = filename.split('.').pop();
     if (ext && ext.length <= 5) return ext.toLowerCase();
   }
   
-  // Fallback to mime type mapping
   return mimeToExt[mimeType] || 'bin';
 }
 
-// Download media file from WhatsApp API
-// Download media file from WhatsApp API - CORRECT VERSION
+// ✅ FIXED: Download media file from WhatsApp API
 async function downloadWhatsAppMedia(mediaId) {
   try {
-    console.log(`🔗 Getting media URL for ID: ${mediaId}`);
+    console.log(`🔗 Attempting to download media ID: ${mediaId}`);
     
-    // WhatsApp Business API URL format
+    // WhatsApp Business API requires ACCESS_TOKEN with media permissions
+    const accessToken = process.env.WHATSAPP_TOKEN || process.env.ACCESS_TOKEN;
+    
+    if (!accessToken) {
+      console.error('❌ No WhatsApp access token found');
+      return null;
+    }
+    
     const response = await axios.get(
-      `https://graph.facebook.com/v18.0/${mediaId}`,  // यह सही है
+      `https://graph.facebook.com/v18.0/${mediaId}`,
       {
         headers: {
-          'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN || process.env.ACCESS_TOKEN}`,
+          'Authorization': `Bearer ${accessToken}`,
           'Content-Type': 'application/json'
         },
         timeout: 10000
       }
     );
     
-    // Response में ये structure आता है:
-    // {
-    //   "url": "https://lookaside.fbsbx.com/whatsapp_business/...",
-    //   "mime_type": "image/jpeg",
-    //   "sha256": "...",
-    //   "file_size": 123456,
-    //   "id": "..."
-    // }
+    console.log(`✅ Media API Response:`, {
+      has_url: !!response.data?.url,
+      url_length: response.data?.url?.length,
+      mime_type: response.data?.mime_type,
+      file_size: response.data?.file_size
+    });
     
-    if (response.data && response.data.url) {
-      console.log(`✅ Got media URL: ${response.data.url.substring(0, 50)}...`);
-      return response.data.url;
-    } else {
-      console.log('⚠️ Media URL not found in response:', response.data);
-      return null;
-    }
+    return response.data?.url || null;
     
   } catch (error) {
-    console.error('❌ Failed to get media URL:', {
+    console.error('❌ Media download failed:', {
       status: error.response?.status,
-      data: error.response?.data,
-      message: error.message,
+      error: error.response?.data || error.message,
       mediaId: mediaId
     });
     return null;
   }
 }
+
 // Save media to local server
 async function saveMediaToServer(downloadUrl, fileType, fileName, mediaId) {
   try {
@@ -141,18 +135,19 @@ async function saveMediaToServer(downloadUrl, fileType, fileName, mediaId) {
       return null;
     }
     
-    console.log(`📥 Downloading media from: ${downloadUrl.substring(0, 60)}...`);
+    console.log(`📥 Downloading media from URL...`);
     
-    // Download the file
+    const accessToken = process.env.WHATSAPP_TOKEN || process.env.ACCESS_TOKEN;
+    
     const response = await axios.get(downloadUrl, {
       responseType: 'arraybuffer',
       headers: {
-        'Authorization': `Bearer ${process.env.ACCESS_TOKEN}`
+        'Authorization': `Bearer ${accessToken}`
       },
-      timeout: 30000 // 30 second timeout for large files
+      timeout: 30000
     });
     
-    // Create uploads directory if not exists
+    // Create uploads directory
     const uploadDir = path.join(__dirname, 'uploads', 'media');
     
     if (!fs.existsSync(uploadDir)) {
@@ -164,7 +159,7 @@ async function saveMediaToServer(downloadUrl, fileType, fileName, mediaId) {
     const timestamp = Date.now();
     const contentType = response.headers['content-type'] || 'application/octet-stream';
     const ext = getFileExtension(contentType, fileName);
-    const safeMediaId = mediaId.replace(/[^a-zA-Z0-9]/g, '_');
+    const safeMediaId = mediaId.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
     const savedFileName = `${timestamp}_${safeMediaId}.${ext}`;
     const filePath = path.join(uploadDir, savedFileName);
     
@@ -229,7 +224,7 @@ async function initializeDatabase() {
       )
     `);
 
-    // Create messages table
+    // Create messages table with media support
     await pool.query(`
       CREATE TABLE IF NOT EXISTS messages (
         id SERIAL PRIMARY KEY,
@@ -240,7 +235,10 @@ async function initializeDatabase() {
         whatsapp_message_id VARCHAR(100),
         status VARCHAR(20) DEFAULT 'sent' CHECK (status IN ('sent', 'delivered', 'read', 'failed')),
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        media_type VARCHAR(50),
+        media_info JSONB,
+        message_type_detail VARCHAR(50)
       )
     `);
 
@@ -251,6 +249,7 @@ async function initializeDatabase() {
       CREATE INDEX IF NOT EXISTS idx_chats_last_message ON chats(last_message_at DESC);
       CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);
       CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_messages_media_type ON messages(media_type);
     `);
 
     console.log('✅ Database tables created/verified successfully');
@@ -265,14 +264,12 @@ const dbHelpers = {
   // Contact Functions
   async findOrCreateContact(phoneNumber, name = null) {
     try {
-      // Try to find existing contact
       const findResult = await pool.query(
         'SELECT * FROM contacts WHERE phone_number = $1',
         [phoneNumber]
       );
       
       if (findResult.rows.length > 0) {
-        // Update existing contact
         await pool.query(
           `UPDATE contacts 
            SET last_message_at = CURRENT_TIMESTAMP,
@@ -284,7 +281,6 @@ const dbHelpers = {
         return findResult.rows[0];
       }
       
-      // Create new contact
       const createResult = await pool.query(
         `INSERT INTO contacts 
          (phone_number, name, last_message_at, message_count) 
@@ -312,7 +308,6 @@ const dbHelpers = {
         return findResult.rows[0];
       }
       
-      // Create new chat
       const createResult = await pool.query(
         `INSERT INTO chats 
          (contact_id, phone_number, unread_count, last_message_at) 
@@ -331,19 +326,17 @@ const dbHelpers = {
   // Message Functions
   async addMessage(chatId, contactId, messageData) {
     try {
-      // Prepare content for last_message field
       let lastMessageContent = null;
       
       if (messageData.content) {
         lastMessageContent = messageData.content.substring(0, 200);
       } else if (messageData.mediaInfo) {
-        // Show media indicator in last message preview
         switch(messageData.mediaInfo.type) {
           case 'image':
             lastMessageContent = '🖼️ Image';
             break;
           case 'audio':
-            lastMessageContent = '🎵 Audio Message';
+            lastMessageContent = '🎵 Audio';
             break;
           case 'video':
             lastMessageContent = '🎬 Video';
@@ -531,29 +524,20 @@ async function forwardToN8N(messageData, source) {
   try {
     console.log(`🔄 Forwarding to n8n (${source}): ${N8N_WEBHOOK_URL}`);
     
-    // n8n को आसान format में भेजें
     const n8nPayload = {
-      // Basic message info
       from: messageData.phone,
       message: messageData.content,
       timestamp: messageData.timestamp || new Date().toISOString(),
       contactName: messageData.contactName || `+${messageData.phone}`,
       messageId: messageData.messageId || `msg-${Date.now()}`,
-      
-      // Source information
-      source: source, // 'whatsapp_incoming' or 'dashboard_outgoing'
+      source: source,
       direction: messageData.type === 'received' ? 'incoming' : 'outgoing',
-      
-      // Database IDs (if available)
       contactId: messageData.contactId,
       chatId: messageData.chatId,
-      
-      // Additional metadata
       platform: 'whatsapp',
       serverTime: new Date().toISOString()
     };
     
-    // Add full Meta payload for WhatsApp messages
     if (source === 'whatsapp_incoming' && messageData.metaPayload) {
       n8nPayload.metaData = messageData.metaPayload;
     }
@@ -564,7 +548,7 @@ async function forwardToN8N(messageData, source) {
         'X-Source': 'whatsapp-backend',
         'X-Forwarded-Time': new Date().toISOString()
       },
-      timeout: 8000 // 8 second timeout
+      timeout: 8000
     });
     
     console.log(`✅ Successfully forwarded to n8n. Status: ${response.status}`);
@@ -572,8 +556,6 @@ async function forwardToN8N(messageData, source) {
     
   } catch (error) {
     console.error(`❌ Failed to forward to n8n (${source}):`, error.message);
-    
-    // Don't crash the main flow if n8n fails
     return { 
       success: false, 
       error: error.message,
@@ -662,7 +644,7 @@ function getDocumentType(mimeType) {
   return mimeMap[mimeType] || 'Document';
 }
 
-// Process incoming WhatsApp message - UPDATED WITH MEDIA DOWNLOAD
+// ✅ FIXED: Process incoming WhatsApp message
 async function processIncomingMessage(message, metaPayload = null) {
   const phone = message.from;
   const timestamp = new Date(message.timestamp * 1000);
@@ -670,7 +652,9 @@ async function processIncomingMessage(message, metaPayload = null) {
   console.log(`💬 Processing WhatsApp message from ${phone}, type: ${message.type}`);
   
   try {
-    // **Step 1: Differentiate ALL message types**
+    // ✅ DEBUG: Log full message object
+    console.log('🔍 FULL MESSAGE OBJECT:', JSON.stringify(message, null, 2));
+    
     let content = '';
     let mediaInfo = null;
     let messageTypeDetail = message.type;
@@ -678,12 +662,22 @@ async function processIncomingMessage(message, metaPayload = null) {
     // Text Message
     if (message.type === 'text') {
       content = message.text?.body || '[Text Message]';
+      console.log(`📝 Text message: ${content}`);
     } 
-    // Audio/Voice Message
+    // ✅ FIXED: Audio/Voice Message - User का message निकालो
     else if (message.type === 'audio' || message.type === 'voice') {
       const audio = message.audio || message.voice;
+      
+      // WhatsApp voice/audio में user का text नहीं होता
+      // लेकिन हम descriptive message show कर सकते हैं
+      const messageType = message.type === 'voice' ? 'Voice Message' : 'Audio Message';
+      const duration = audio?.duration ? `${audio.duration}s` : '';
+      
+      content = `🎵 ${messageType} ${duration}`.trim();
+      
+      console.log(`🎵 Audio message received: ${content}`);
+      
       if (audio) {
-        content = `🎵 Audio Message (${audio.mime_type || 'audio/ogg'}, ${formatBytes(audio.file_size)})`;
         mediaInfo = {
           type: 'audio',
           mime_type: audio.mime_type || 'audio/ogg',
@@ -691,19 +685,18 @@ async function processIncomingMessage(message, metaPayload = null) {
           id: audio.id,
           duration: audio.duration || 'unknown',
           sha256: audio.sha256,
-          voice_message: (message.type === 'voice')
+          voice_message: (message.type === 'voice'),
+          user_message: messageType  // Store descriptive message
         };
         
-        // ✅ MEDIA DOWNLOAD FOR AUDIO
+        // ✅ Try to download audio
         if (audio.id) {
           console.log(`🎵 Attempting to download audio: ${audio.id}`);
           
           try {
-            // 1. Get download URL
             const downloadUrl = await downloadWhatsAppMedia(audio.id);
             
             if (downloadUrl) {
-              // 2. Save to server
               const savedFile = await saveMediaToServer(
                 downloadUrl,
                 'audio',
@@ -712,33 +705,35 @@ async function processIncomingMessage(message, metaPayload = null) {
               );
               
               if (savedFile) {
-                // 3. Update mediaInfo with local file info
                 mediaInfo.downloaded = true;
                 mediaInfo.localUrl = savedFile.url;
                 mediaInfo.localPath = savedFile.filePath;
                 mediaInfo.actualFileSize = savedFile.size;
                 mediaInfo.contentType = savedFile.contentType;
                 
-                // Update content to show actual size
-                content = `🎵 Audio Message (${formatBytes(savedFile.size)})`;
-                
                 console.log(`✅ Audio saved locally: ${savedFile.filePath}`);
+                
+                // Update content with actual file size
+                content = `🎵 ${messageType} (${formatBytes(savedFile.size)})`;
               }
             }
           } catch (downloadError) {
             console.error('❌ Audio download failed:', downloadError.message);
           }
         }
-      } else {
-        content = '🎵 Audio Message';
       }
     }
-    // Image Message
+    // ✅ FIXED: Image Message - User का caption निकालो
     else if (message.type === 'image') {
       const image = message.image;
+      
       if (image) {
-        const captionText = image.caption ? ` - ${image.caption}` : '';
-        content = `🖼️ Image${captionText} (${image.mime_type || 'image/jpeg'}, ${formatBytes(image.file_size)})`;
+        // User का actual message = caption या "Sent an image"
+        const userMessage = image.caption || 'Sent an image';
+        content = `🖼️ ${userMessage}`;
+        
+        console.log(`🖼️ Image message: ${content}, Caption: ${image.caption || 'No caption'}`);
+        
         mediaInfo = {
           type: 'image',
           mime_type: image.mime_type || 'image/jpeg',
@@ -747,19 +742,18 @@ async function processIncomingMessage(message, metaPayload = null) {
           caption: image.caption || '',
           sha256: image.sha256,
           width: image.width,
-          height: image.height
+          height: image.height,
+          user_message: userMessage  // ✅ Store user's actual message
         };
         
-        // ✅ MEDIA DOWNLOAD FOR IMAGE
+        // ✅ Try to download image
         if (image.id) {
-          console.log(`📸 Attempting to download image: ${image.id}`);
+          console.log(`🖼️ Attempting to download image: ${image.id}`);
           
           try {
-            // 1. Get download URL
             const downloadUrl = await downloadWhatsAppMedia(image.id);
             
             if (downloadUrl) {
-              // 2. Save to server
               const savedFile = await saveMediaToServer(
                 downloadUrl,
                 'image',
@@ -768,17 +762,16 @@ async function processIncomingMessage(message, metaPayload = null) {
               );
               
               if (savedFile) {
-                // 3. Update mediaInfo with local file info
                 mediaInfo.downloaded = true;
                 mediaInfo.localUrl = savedFile.url;
                 mediaInfo.localPath = savedFile.filePath;
                 mediaInfo.actualFileSize = savedFile.size;
                 mediaInfo.contentType = savedFile.contentType;
                 
-                // Update content to show actual size
-                content = `🖼️ Image${captionText} (${formatBytes(savedFile.size)})`;
-                
                 console.log(`✅ Image saved locally: ${savedFile.filePath}`);
+                
+                // Update content with actual file size
+                content = `🖼️ ${userMessage} (${formatBytes(savedFile.size)})`;
               }
             }
           } catch (downloadError) {
@@ -789,13 +782,13 @@ async function processIncomingMessage(message, metaPayload = null) {
         content = '🖼️ Image';
       }
     }
-    // Document Message (PDF, Excel, Word, HTML, etc.)
+    // Document Message
     else if (message.type === 'document') {
       const document = message.document;
       if (document) {
         const filename = document.filename || getDocumentType(document.mime_type);
         const captionText = document.caption ? ` - ${document.caption}` : '';
-        content = `📄 ${filename}${captionText} (${document.mime_type}, ${formatBytes(document.file_size)})`;
+        content = `📄 ${filename}${captionText}`;
         mediaInfo = {
           type: 'document',
           mime_type: document.mime_type,
@@ -815,7 +808,7 @@ async function processIncomingMessage(message, metaPayload = null) {
       const video = message.video;
       if (video) {
         const captionText = video.caption ? ` - ${video.caption}` : '';
-        content = `🎬 Video${captionText} (${video.mime_type || 'video/mp4'}, ${formatBytes(video.file_size)})`;
+        content = `🎬 Video${captionText}`;
         mediaInfo = {
           type: 'video',
           mime_type: video.mime_type || 'video/mp4',
@@ -840,7 +833,7 @@ async function processIncomingMessage(message, metaPayload = null) {
     else if (message.type === 'location') {
       const location = message.location;
       if (location) {
-        content = `📍 Location: ${location.name || 'Shared Location'} (${location.latitude}, ${location.longitude})`;
+        content = `📍 Location: ${location.name || 'Shared Location'}`;
         mediaInfo = {
           type: 'location',
           latitude: location.latitude,
@@ -860,14 +853,14 @@ async function processIncomingMessage(message, metaPayload = null) {
         contacts: message.contacts || []
       };
     }
-    // Interactive Messages (Buttons, Lists)
+    // Interactive Messages
     else if (message.type === 'interactive') {
       const interactive = message.interactive;
       if (interactive) {
         if (interactive.type === 'button_reply') {
-          content = `🔘 Button: ${interactive.button_reply?.title || 'Button Clicked'}`;
+          content = `🔘 ${interactive.button_reply?.title || 'Button Clicked'}`;
         } else if (interactive.type === 'list_reply') {
-          content = `📋 List Selection: ${interactive.list_reply?.title || 'List Item Selected'}`;
+          content = `📋 ${interactive.list_reply?.title || 'List Item Selected'}`;
         } else {
           content = '🔄 Interactive Message';
         }
@@ -884,7 +877,7 @@ async function processIncomingMessage(message, metaPayload = null) {
     else if (message.type === 'reaction') {
       const reaction = message.reaction;
       if (reaction) {
-        content = `${reaction.emoji} Reaction to message ${reaction.message_id}`;
+        content = `${reaction.emoji} Reaction`;
         mediaInfo = {
           type: 'reaction',
           emoji: reaction.emoji,
@@ -903,50 +896,50 @@ async function processIncomingMessage(message, metaPayload = null) {
       };
     }
     
-    // **Step 2: Save to PostgreSQL database**
+    // Save to PostgreSQL database
     const contact = await dbHelpers.findOrCreateContact(phone);
     const chat = await dbHelpers.findOrCreateChat(contact.id, phone);
     
-    // Prepare message data with media info
+    // ✅ Use actual user message for database
+    const actualContent = content;
+    
     const messageData = {
       type: 'received',
-      content: content,
+      content: actualContent,
       whatsappMessageId: message.id,
       timestamp: timestamp,
       status: 'delivered',
       messageTypeDetail: messageTypeDetail
     };
     
-    // If media exists, store additional info
     if (mediaInfo) {
       messageData.mediaInfo = mediaInfo;
     }
     
     const savedMessage = await dbHelpers.addMessage(chat.id, contact.id, messageData);
 
-    // **Step 3: Forward to n8n with complete media info**
+    // Forward to n8n
     const n8nForwardResult = await forwardToN8N({
       phone: phone,
-      content: content,
+      content: actualContent,  // ✅ Actual user message
       timestamp: timestamp,
       contactName: contact.name,
       messageId: message.id,
       type: 'received',
       contactId: contact.id,
       chatId: chat.id,
-      messageType: messageTypeDetail, // Add message type
-      mediaInfo: mediaInfo, // Include media details
-      metaPayload: metaPayload // Pass full Meta payload
+      messageType: messageTypeDetail,
+      mediaInfo: mediaInfo,
+      metaPayload: metaPayload
     }, 'whatsapp_incoming');
     
-    // Log n8n forwarding result
     if (n8nForwardResult.success) {
       console.log(`✅ ${messageTypeDetail.toUpperCase()} message forwarded to n8n successfully`);
     } else {
       console.log(`⚠️ ${messageTypeDetail.toUpperCase()} message saved but n8n forwarding failed`);
     }
     
-    // **Step 4: Store in memory for backward compatibility**
+    // Store in memory for backward compatibility
     if (!chats[phone]) {
       chats[phone] = {
         number: phone,
@@ -959,34 +952,34 @@ async function processIncomingMessage(message, metaPayload = null) {
     
     chats[phone].messages.push({
       id: message.id,
-      text: content,
+      text: actualContent,  // ✅ Actual user message
       timestamp: timestamp,
       type: 'received',
       from: phone,
-      messageType: messageTypeDetail, // Store message type
-      mediaInfo: mediaInfo // Store media info
+      messageType: messageTypeDetail,
+      mediaInfo: mediaInfo
     });
     
     chats[phone].lastMessage = timestamp;
     chats[phone].unread++;
     
-    // **Step 5: Notify connected clients via Socket.IO**
+    // Notify connected clients via Socket.IO
     io.emit('new_message', {
       from: phone,
-      message: content,
+      message: actualContent,  // ✅ Actual user message
       timestamp: timestamp,
       contactName: contact.name,
       messageId: savedMessage.id,
-      messageType: messageTypeDetail, // Add message type
-      mediaInfo: mediaInfo, // Include media details
+      messageType: messageTypeDetail,
+      mediaInfo: mediaInfo,
       source: 'whatsapp',
       n8nForwarded: n8nForwardResult.success
     });
     
-    console.log(`💾 Saved ${messageTypeDetail} message to database and forwarded to n8n: ${phone}`);
+    console.log(`💾 Saved ${messageTypeDetail} message: ${phone} - "${actualContent}"`);
     
   } catch (error) {
-    console.error('Error processing incoming WhatsApp message:', error);
+    console.error('❌ Error processing WhatsApp message:', error);
   }
 }
 
@@ -1000,7 +993,6 @@ app.get('/api/media/:filename', (req, res) => {
     console.log(`📤 Serving media file: ${req.params.filename}`);
     
     if (fs.existsSync(filePath)) {
-      // Determine content type
       const ext = path.extname(filePath).toLowerCase();
       const mimeTypes = {
         '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
@@ -1014,13 +1006,11 @@ app.get('/api/media/:filename', (req, res) => {
       const contentType = mimeTypes[ext] || 'application/octet-stream';
       res.setHeader('Content-Type', contentType);
       
-      // For audio/video, allow range requests for streaming
       if (ext === '.mp3' || ext === '.ogg' || ext === '.opus' || ext === '.mp4') {
         res.setHeader('Accept-Ranges', 'bytes');
       }
       
-      // Set cache headers
-      res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache for 1 day
+      res.setHeader('Cache-Control', 'public, max-age=86400');
       
       const fileStream = fs.createReadStream(filePath);
       fileStream.pipe(res);
@@ -1033,8 +1023,7 @@ app.get('/api/media/:filename', (req, res) => {
       console.log(`❌ File not found: ${filePath}`);
       res.status(404).json({
         error: 'File not found',
-        filename: req.params.filename,
-        path: filePath
+        filename: req.params.filename
       });
     }
   } catch (error) {
@@ -1074,4 +1063,406 @@ app.post('/api/n8n/messages', async (req, res) => {
     console.log(`📤 Processing n8n message to ${to}: ${message.substring(0, 50)}...`);
     
     // Save to database as outgoing message
-    const contact = await dbHelpers.findOr
+    const contact = await dbHelpers.findOrCreateContact(to, contactName);
+    const chat = await dbHelpers.findOrCreateChat(contact.id, to);
+    
+    const savedMessage = await dbHelpers.addMessage(chat.id, contact.id, {
+      type: 'sent',
+      content: message,
+      whatsappMessageId: messageId || `n8n-${Date.now()}`,
+      timestamp: new Date(timestamp),
+      status: 'sent'
+    });
+    
+    // Store in memory for backward compatibility
+    if (!chats[to]) {
+      chats[to] = {
+        number: to,
+        name: contactName || `+${to}`,
+        messages: [],
+        unread: 0,
+        lastMessage: new Date()
+      };
+    }
+    
+    chats[to].messages.push({
+      id: messageId || `n8n-${Date.now()}`,
+      text: message,
+      timestamp: new Date(timestamp),
+      type: 'sent',
+      from: 'me'
+    });
+    
+    chats[to].lastMessage = new Date();
+    
+    // Notify connected clients via Socket.IO
+    io.emit('new_message', {
+      from: to,
+      message: message,
+      timestamp: new Date(timestamp),
+      contactName: contact.name,
+      messageId: savedMessage.id,
+      source: 'n8n',
+      direction: 'outgoing'
+    });
+    
+    console.log(`✅ n8n message saved to database for ${to}`);
+    
+    res.status(200).json({ 
+      success: true, 
+      messageId: savedMessage.id,
+      databaseId: savedMessage.id,
+      timestamp: new Date().toISOString(),
+      message: 'Message saved to database successfully'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error processing n8n message:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ==================== DASHBOARD ENDPOINTS ====================
+
+// API: Send message from dashboard
+app.post('/api/send', async (req, res) => {
+  try {
+    const { to, message } = req.body;
+    
+    if (!to || !message) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing to or message field'
+      });
+    }
+    
+    console.log(`📤 Dashboard sending message to ${to}: ${message.substring(0, 50)}...`);
+    
+    // 1. Send via WhatsApp API
+    const response = await axios.post(
+      `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: to,
+        type: "text",
+        text: {
+          preview_url: false,
+          body: message
+        }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.ACCESS_TOKEN}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    const whatsappMessageId = response.data.messages?.[0]?.id;
+    
+    // 2. Save to PostgreSQL database
+    const contact = await dbHelpers.findOrCreateContact(to);
+    const chat = await dbHelpers.findOrCreateChat(contact.id, to);
+    
+    const savedMessage = await dbHelpers.addMessage(chat.id, contact.id, {
+      type: 'sent',
+      content: message,
+      whatsappMessageId: whatsappMessageId,
+      timestamp: new Date(),
+      status: 'sent'
+    });
+    
+    console.log(`💾 Saved dashboard message to database: ${to}`);
+    
+    // 3. Forward to n8n
+    const n8nResult = await forwardToN8N({
+      phone: to,
+      content: message,
+      timestamp: new Date(),
+      contactName: contact.name,
+      messageId: whatsappMessageId,
+      type: 'sent',
+      contactId: contact.id,
+      chatId: chat.id
+    }, 'dashboard_outgoing');
+    
+    // 4. Store in memory for backward compatibility
+    if (!chats[to]) {
+      chats[to] = {
+        number: to,
+        name: contact.name || `+${to}`,
+        messages: [],
+        unread: 0,
+        lastMessage: new Date()
+      };
+    }
+    
+    chats[to].messages.push({
+      id: whatsappMessageId,
+      text: message,
+      timestamp: new Date(),
+      type: 'sent',
+      from: 'me'
+    });
+    
+    chats[to].lastMessage = new Date();
+    
+    // 5. Notify via Socket.IO
+    io.emit('message_sent', {
+      to: to,
+      message: message,
+      messageId: savedMessage.id,
+      whatsappMessageId: whatsappMessageId,
+      timestamp: new Date(),
+      n8nForwarded: n8nResult.success
+    });
+    
+    res.json({ 
+      success: true, 
+      data: response.data,
+      databaseId: savedMessage.id,
+      n8nForwarded: n8nResult.success,
+      message: 'Message sent successfully'
+    });
+    
+  } catch (error) {
+    console.error('❌ Send message error:', error.response?.data || error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: error.response?.data || error.message 
+    });
+  }
+});
+
+// API: Get all chats (from database)
+app.get('/api/chats', async (req, res) => {
+  try {
+    cleanupOldData();
+    
+    // Try to get from database first
+    const dbChats = await dbHelpers.getAllChats();
+    
+    if (dbChats.length > 0) {
+      const formattedChats = dbChats.map(chat => ({
+        id: chat.id,
+        number: chat.phone_number,
+        name: chat.contact_name || `+${chat.phone_number}`,
+        messages: [],
+        unread: chat.unread_count || 0,
+        lastMessage: chat.last_message,
+        lastMessageAt: chat.last_message_at,
+        contactInfo: {
+          name: chat.contact_name,
+          status: chat.contact_status,
+          email: chat.contact_email
+        }
+      }));
+      
+      res.json(formattedChats);
+    } else {
+      res.json(Object.values(chats));
+    }
+    
+  } catch (error) {
+    console.error('Error getting chats:', error);
+    res.json(Object.values(chats));
+  }
+});
+
+// API: Get messages of specific chat (from database)
+app.get('/api/chats/:number/messages', async (req, res) => {
+  const number = req.params.number;
+  
+  try {
+    await dbHelpers.markChatAsRead(number);
+    const messages = await dbHelpers.getChatMessages(number);
+    
+    if (messages.length > 0) {
+      res.json(messages.map(msg => ({
+        id: msg.id,
+        text: msg.content,
+        timestamp: msg.timestamp,
+        type: msg.message_type,
+        from: msg.message_type === 'received' ? number : 'me',
+        status: msg.status,
+        mediaInfo: msg.media_info ? (typeof msg.media_info === 'string' ? JSON.parse(msg.media_info) : msg.media_info) : null
+      })));
+    } else {
+      if (chats[number]) {
+        chats[number].unread = 0;
+        res.json(chats[number].messages);
+      } else {
+        res.json([]);
+      }
+    }
+    
+  } catch (error) {
+    console.error('Error getting messages:', error);
+    if (chats[number]) {
+      chats[number].unread = 0;
+      res.json(chats[number].messages);
+    } else {
+      res.json([]);
+    }
+  }
+});
+
+// ==================== UTILITY ENDPOINTS ====================
+
+// Ping endpoint
+app.get('/ping', (req, res) => {
+  res.json({
+    status: 'pong',
+    timestamp: new Date().toISOString(),
+    service: 'WhatsApp Backend API',
+    uptime: process.uptime(),
+    n8nIntegration: {
+      enabled: true,
+      webhookUrl: N8N_WEBHOOK_URL,
+      status: 'active'
+    },
+    database: 'PostgreSQL connected',
+    chats_count: Object.keys(chats).length
+  });
+});
+
+// Health check endpoint
+app.get('/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    
+    let n8nStatus = 'not_tested';
+    try {
+      const testResponse = await axios.get(N8N_WEBHOOK_URL.replace('/webhook/whatsapp', ''), {
+        timeout: 3000
+      });
+      n8nStatus = 'reachable';
+    } catch {
+      n8nStatus = 'webhook_only';
+    }
+    
+    res.json({ 
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      service: 'WhatsApp Business API',
+      version: '2.1.0',
+      environment: process.env.NODE_ENV || 'development',
+      database: 'connected',
+      n8nIntegration: {
+        enabled: true,
+        webhookUrl: N8N_WEBHOOK_URL,
+        status: n8nStatus
+      }
+    });
+  } catch (error) {
+    res.json({
+      status: 'degraded',
+      timestamp: new Date().toISOString(),
+      service: 'WhatsApp Business API',
+      version: '2.1.0',
+      environment: process.env.NODE_ENV || 'development',
+      database: 'disconnected',
+      n8nIntegration: {
+        enabled: true,
+        webhookUrl: N8N_WEBHOOK_URL,
+        status: 'active'
+      },
+      warning: 'Database connection failed'
+    });
+  }
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    service: 'WhatsApp Business API Backend',
+    status: 'running',
+    version: '2.1.0',
+    database: 'PostgreSQL',
+    n8nIntegration: {
+      url: N8N_WEBHOOK_URL,
+      status: 'active'
+    },
+    features: [
+      'Webhook handling',
+      'Message storage in database',
+      'Real-time updates',
+      'Contact management',
+      'Chat persistence',
+      'n8n Integration (Dual-way)'
+    ],
+    endpoints: {
+      webhook: '/webhook (GET/POST)',
+      chats: '/api/chats (GET)',
+      send: '/api/send (POST)',
+      'n8n-messages': '/api/n8n/messages (POST)',
+      health: '/health (GET)',
+      ping: '/ping (GET)'
+    }
+  });
+});
+
+// Socket.IO connection handler
+io.on('connection', (socket) => {
+  console.log('🔌 New client connected:', socket.id);
+  
+  socket.emit('connection_established', {
+    message: 'Connected to WhatsApp Backend',
+    n8nEnabled: true,
+    timestamp: new Date().toISOString()
+  });
+  
+  socket.on('disconnect', () => {
+    console.log('Client disconnected:', socket.id);
+  });
+});
+
+// Auto cleanup every 30 minutes (for memory chats)
+setInterval(cleanupOldData, 30 * 60 * 1000);
+
+// Start Server
+async function startServer() {
+  try {
+    // Initialize database
+    await initializeDatabase();
+    console.log('📊 Database initialization complete');
+    
+    // Test database connection
+    await pool.query('SELECT 1');
+    console.log('✅ PostgreSQL connection established');
+    
+    // Create uploads directory if not exists
+    const uploadDir = path.join(__dirname, 'uploads', 'media');
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+      console.log(`📁 Created uploads directory: ${uploadDir}`);
+    }
+    
+    console.log('🔄 n8n Integration Status:');
+    console.log(`   Webhook URL: ${N8N_WEBHOOK_URL}`);
+    console.log('   Direction: Dual-way (WhatsApp → n8n AND Dashboard → n8n)');
+    
+    const PORT = process.env.PORT || 10000;
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 WhatsApp Backend Server started`);
+      console.log(`📍 Port: ${PORT}`);
+      console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`💾 Database: PostgreSQL connected`);
+      console.log(`🔄 n8n Integration: ACTIVE`);
+      console.log(`📞 Endpoint: http://localhost:${PORT}`);
+      console.log(`🔗 n8n Webhook: ${N8N_WEBHOOK_URL}`);
+      console.log(`📤 All messages will be forwarded to n8n`);
+    });
+    
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+// Start the server
+startServer();
