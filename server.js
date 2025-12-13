@@ -6,6 +6,8 @@ const axios = require('axios'); // ✅ axios already included
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -26,8 +28,6 @@ const pool = new Pool({
 app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-
-
 
 // N8N Webhook URL - आपका URL
 const N8N_WEBHOOK_URL = "https://xibado3.app.n8n.cloud/webhook/whatsapp";
@@ -63,6 +63,109 @@ const verifyN8nApiKey = (req, res, next) => {
 };
 
 app.use(verifyN8nApiKey);
+
+// ==================== MEDIA DOWNLOAD HELPERS ====================
+
+// Get file extension from mime type
+function getFileExtension(mimeType, filename = '') {
+  const mimeToExt = {
+    'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
+    'audio/ogg': 'ogg', 'audio/opus': 'opus', 'audio/mpeg': 'mp3',
+    'audio/aac': 'aac', 'video/mp4': 'mp4', 'application/pdf': 'pdf',
+    'text/plain': 'txt', 'application/msword': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'application/vnd.ms-excel': 'xls'
+  };
+  
+  // First try to get extension from filename
+  if (filename) {
+    const ext = filename.split('.').pop();
+    if (ext && ext.length <= 5) return ext.toLowerCase();
+  }
+  
+  // Fallback to mime type mapping
+  return mimeToExt[mimeType] || 'bin';
+}
+
+// Download media file from WhatsApp API
+async function downloadWhatsAppMedia(mediaId) {
+  try {
+    console.log(`🔗 Getting download URL for media: ${mediaId}`);
+    
+    const response = await axios.get(
+      `https://graph.facebook.com/v18.0/${mediaId}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.ACCESS_TOKEN}`
+        }
+      }
+    );
+    
+    console.log(`✅ Got download URL for media ${mediaId}`);
+    return response.data.url; // Temporary download URL
+  } catch (error) {
+    console.error('❌ Failed to get media URL:', error.response?.data || error.message);
+    return null;
+  }
+}
+
+// Save media to local server
+async function saveMediaToServer(downloadUrl, fileType, fileName, mediaId) {
+  try {
+    if (!downloadUrl) {
+      console.error('❌ No download URL provided');
+      return null;
+    }
+    
+    console.log(`📥 Downloading media from: ${downloadUrl.substring(0, 60)}...`);
+    
+    // Download the file
+    const response = await axios.get(downloadUrl, {
+      responseType: 'arraybuffer',
+      headers: {
+        'Authorization': `Bearer ${process.env.ACCESS_TOKEN}`
+      },
+      timeout: 30000 // 30 second timeout for large files
+    });
+    
+    // Create uploads directory if not exists
+    const uploadDir = path.join(__dirname, 'uploads', 'media');
+    
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+      console.log(`📁 Created directory: ${uploadDir}`);
+    }
+    
+    // Generate filename
+    const timestamp = Date.now();
+    const contentType = response.headers['content-type'] || 'application/octet-stream';
+    const ext = getFileExtension(contentType, fileName);
+    const safeMediaId = mediaId.replace(/[^a-zA-Z0-9]/g, '_');
+    const savedFileName = `${timestamp}_${safeMediaId}.${ext}`;
+    const filePath = path.join(uploadDir, savedFileName);
+    
+    // Save file
+    fs.writeFileSync(filePath, Buffer.from(response.data));
+    
+    // Create accessible URL
+    const fileUrl = `/api/media/${savedFileName}`;
+    
+    console.log(`💾 Media saved: ${filePath} (${response.data.length} bytes)`);
+    
+    return {
+      filePath: filePath,
+      url: fileUrl,
+      fileName: savedFileName,
+      size: response.data.length,
+      contentType: contentType
+    };
+    
+  } catch (error) {
+    console.error('❌ Failed to save media:', error.message);
+    return null;
+  }
+}
 
 // Initialize Database Tables
 async function initializeDatabase() {
@@ -203,81 +306,80 @@ const dbHelpers = {
   },
 
   // Message Functions
- // Updated addMessage function with better media handling
-async function addMessage(chatId, contactId, messageData) {
-  try {
-    // Prepare content for last_message field
-    let lastMessageContent = null;
-    
-    if (messageData.content) {
-      lastMessageContent = messageData.content.substring(0, 200);
-    } else if (messageData.mediaInfo) {
-      // Show media indicator in last message preview
-      switch(messageData.mediaInfo.type) {
-        case 'image':
-          lastMessageContent = '🖼️ Image';
-          break;
-        case 'audio':
-          lastMessageContent = '🎵 Audio Message';
-          break;
-        case 'video':
-          lastMessageContent = '🎬 Video';
-          break;
-        case 'document':
-          lastMessageContent = '📄 Document';
-          break;
-        default:
-          lastMessageContent = '📁 Media';
-      }
+  async addMessage(chatId, contactId, messageData) {
+    try {
+      // Prepare content for last_message field
+      let lastMessageContent = null;
       
-      if (messageData.mediaInfo.caption) {
-        lastMessageContent += `: ${messageData.mediaInfo.caption.substring(0, 100)}`;
+      if (messageData.content) {
+        lastMessageContent = messageData.content.substring(0, 200);
+      } else if (messageData.mediaInfo) {
+        // Show media indicator in last message preview
+        switch(messageData.mediaInfo.type) {
+          case 'image':
+            lastMessageContent = '🖼️ Image';
+            break;
+          case 'audio':
+            lastMessageContent = '🎵 Audio Message';
+            break;
+          case 'video':
+            lastMessageContent = '🎬 Video';
+            break;
+          case 'document':
+            lastMessageContent = '📄 Document';
+            break;
+          default:
+            lastMessageContent = '📁 Media';
+        }
+        
+        if (messageData.mediaInfo.caption) {
+          lastMessageContent += `: ${messageData.mediaInfo.caption.substring(0, 100)}`;
+        }
       }
+
+      // Insert message with media info
+      const messageResult = await pool.query(
+        `INSERT INTO messages 
+         (chat_id, contact_id, message_type, content, whatsapp_message_id, 
+          status, timestamp, message_type_detail, media_info, media_type)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING *`,
+        [
+          chatId,
+          contactId,
+          messageData.type,
+          messageData.content,
+          messageData.whatsappMessageId,
+          messageData.status || 'delivered',
+          messageData.timestamp || new Date(),
+          messageData.messageTypeDetail || null,
+          messageData.mediaInfo ? JSON.stringify(messageData.mediaInfo) : null,
+          messageData.mediaInfo?.type || null
+        ]
+      );
+
+      // Update chat metadata
+      await pool.query(
+        `UPDATE chats 
+         SET last_message = $1,
+             last_message_at = $2,
+             unread_count = unread_count + $3,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $4`,
+        [
+          lastMessageContent,
+          messageData.timestamp || new Date(),
+          messageData.type === 'received' ? 1 : 0,
+          chatId
+        ]
+      );
+
+      return messageResult.rows[0];
+    } catch (error) {
+      console.error('Add message error:', error);
+      throw error;
     }
-
-    // Insert message with media info
-    const messageResult = await pool.query(
-      `INSERT INTO messages 
-       (chat_id, contact_id, message_type, content, whatsapp_message_id, 
-        status, timestamp, message_type_detail, media_info, media_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       RETURNING *`,
-      [
-        chatId,
-        contactId,
-        messageData.type,
-        messageData.content,
-        messageData.whatsappMessageId,
-        messageData.status || 'delivered',
-        messageData.timestamp || new Date(),
-        messageData.messageTypeDetail || null,
-        messageData.mediaInfo ? JSON.stringify(messageData.mediaInfo) : null,
-        messageData.mediaInfo?.type || null  // Add media_type column for easier filtering
-      ]
-    );
-
-    // Update chat metadata
-    await pool.query(
-      `UPDATE chats 
-       SET last_message = $1,
-           last_message_at = $2,
-           unread_count = unread_count + $3,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $4`,
-      [
-        lastMessageContent,
-        messageData.timestamp || new Date(),
-        messageData.type === 'received' ? 1 : 0,
-        chatId
-      ]
-    );
-
-    return messageResult.rows[0];
-  } catch (error) {
-    console.error('Add message error:', error);
-    throw error;
-  }
-}
+  },
 
   // Get all chats
   async getAllChats(limit = 100) {
@@ -502,10 +604,42 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Process incoming WhatsApp message
+// Helper function to format file sizes
+function formatBytes(bytes, decimals = 2) {
+  if (!bytes || bytes === 0) return '0 Bytes';
+  
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+}
 
+// Helper function to get document type from mime type
+function getDocumentType(mimeType) {
+  const mimeMap = {
+    'application/pdf': 'PDF Document',
+    'application/msword': 'Word Document',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word Document',
+    'application/vnd.ms-excel': 'Excel Spreadsheet',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'Excel Spreadsheet',
+    'application/vnd.ms-powerpoint': 'PowerPoint Presentation',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PowerPoint Presentation',
+    'text/plain': 'Text File',
+    'text/html': 'HTML File',
+    'text/csv': 'CSV File',
+    'application/zip': 'ZIP Archive',
+    'application/x-rar-compressed': 'RAR Archive',
+    'application/json': 'JSON File',
+    'application/xml': 'XML File'
+  };
+  
+  return mimeMap[mimeType] || 'Document';
+}
 
-// Process incoming WhatsApp message - COMPLETE VERSION
+// Process incoming WhatsApp message - UPDATED WITH MEDIA DOWNLOAD
 async function processIncomingMessage(message, metaPayload = null) {
   const phone = message.from;
   const timestamp = new Date(message.timestamp * 1000);
@@ -536,6 +670,42 @@ async function processIncomingMessage(message, metaPayload = null) {
           sha256: audio.sha256,
           voice_message: (message.type === 'voice')
         };
+        
+        // ✅ MEDIA DOWNLOAD FOR AUDIO
+        if (audio.id) {
+          console.log(`🎵 Attempting to download audio: ${audio.id}`);
+          
+          try {
+            // 1. Get download URL
+            const downloadUrl = await downloadWhatsAppMedia(audio.id);
+            
+            if (downloadUrl) {
+              // 2. Save to server
+              const savedFile = await saveMediaToServer(
+                downloadUrl,
+                'audio',
+                `whatsapp_audio_${audio.id}`,
+                audio.id
+              );
+              
+              if (savedFile) {
+                // 3. Update mediaInfo with local file info
+                mediaInfo.downloaded = true;
+                mediaInfo.localUrl = savedFile.url;
+                mediaInfo.localPath = savedFile.filePath;
+                mediaInfo.actualFileSize = savedFile.size;
+                mediaInfo.contentType = savedFile.contentType;
+                
+                // Update content to show actual size
+                content = `🎵 Audio Message (${formatBytes(savedFile.size)})`;
+                
+                console.log(`✅ Audio saved locally: ${savedFile.filePath}`);
+              }
+            }
+          } catch (downloadError) {
+            console.error('❌ Audio download failed:', downloadError.message);
+          }
+        }
       } else {
         content = '🎵 Audio Message';
       }
@@ -556,6 +726,42 @@ async function processIncomingMessage(message, metaPayload = null) {
           width: image.width,
           height: image.height
         };
+        
+        // ✅ MEDIA DOWNLOAD FOR IMAGE
+        if (image.id) {
+          console.log(`📸 Attempting to download image: ${image.id}`);
+          
+          try {
+            // 1. Get download URL
+            const downloadUrl = await downloadWhatsAppMedia(image.id);
+            
+            if (downloadUrl) {
+              // 2. Save to server
+              const savedFile = await saveMediaToServer(
+                downloadUrl,
+                'image',
+                `whatsapp_image_${image.id}`,
+                image.id
+              );
+              
+              if (savedFile) {
+                // 3. Update mediaInfo with local file info
+                mediaInfo.downloaded = true;
+                mediaInfo.localUrl = savedFile.url;
+                mediaInfo.localPath = savedFile.filePath;
+                mediaInfo.actualFileSize = savedFile.size;
+                mediaInfo.contentType = savedFile.contentType;
+                
+                // Update content to show actual size
+                content = `🖼️ Image${captionText} (${formatBytes(savedFile.size)})`;
+                
+                console.log(`✅ Image saved locally: ${savedFile.filePath}`);
+              }
+            }
+          } catch (downloadError) {
+            console.error('❌ Image download failed:', downloadError.message);
+          }
+        }
       } else {
         content = '🖼️ Image';
       }
@@ -761,41 +967,61 @@ async function processIncomingMessage(message, metaPayload = null) {
   }
 }
 
-// Helper function to format file sizes
-function formatBytes(bytes, decimals = 2) {
-  if (!bytes || bytes === 0) return '0 Bytes';
-  
-  const k = 1024;
-  const dm = decimals < 0 ? 0 : decimals;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-  
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
-}
+// ==================== MEDIA SERVING ENDPOINT ====================
 
-// Helper function to get document type from mime type
-function getDocumentType(mimeType) {
-  const mimeMap = {
-    'application/pdf': 'PDF Document',
-    'application/msword': 'Word Document',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word Document',
-    'application/vnd.ms-excel': 'Excel Spreadsheet',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'Excel Spreadsheet',
-    'application/vnd.ms-powerpoint': 'PowerPoint Presentation',
-    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PowerPoint Presentation',
-    'text/plain': 'Text File',
-    'text/html': 'HTML File',
-    'text/csv': 'CSV File',
-    'application/zip': 'ZIP Archive',
-    'application/x-rar-compressed': 'RAR Archive',
-    'application/json': 'JSON File',
-    'application/xml': 'XML File'
-  };
-  
-  return mimeMap[mimeType] || 'Document';
-}
-
+// Serve media files endpoint
+app.get('/api/media/:filename', (req, res) => {
+  try {
+    const filePath = path.join(__dirname, 'uploads', 'media', req.params.filename);
+    
+    console.log(`📤 Serving media file: ${req.params.filename}`);
+    
+    if (fs.existsSync(filePath)) {
+      // Determine content type
+      const ext = path.extname(filePath).toLowerCase();
+      const mimeTypes = {
+        '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+        '.gif': 'image/gif', '.webp': 'image/webp',
+        '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.opus': 'audio/opus',
+        '.mp4': 'video/mp4', '.pdf': 'application/pdf',
+        '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        '.xls': 'application/vnd.ms-excel', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      };
+      
+      const contentType = mimeTypes[ext] || 'application/octet-stream';
+      res.setHeader('Content-Type', contentType);
+      
+      // For audio/video, allow range requests for streaming
+      if (ext === '.mp3' || ext === '.ogg' || ext === '.opus' || ext === '.mp4') {
+        res.setHeader('Accept-Ranges', 'bytes');
+      }
+      
+      // Set cache headers
+      res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache for 1 day
+      
+      const fileStream = fs.createReadStream(filePath);
+      fileStream.pipe(res);
+      
+      fileStream.on('error', (err) => {
+        console.error('File stream error:', err);
+        res.status(500).send('Error serving file');
+      });
+    } else {
+      console.log(`❌ File not found: ${filePath}`);
+      res.status(404).json({
+        error: 'File not found',
+        filename: req.params.filename,
+        path: filePath
+      });
+    }
+  } catch (error) {
+    console.error('Error serving media:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
 
 // ==================== N8N INTEGRATION ENDPOINTS ====================
 
@@ -825,406 +1051,4 @@ app.post('/api/n8n/messages', async (req, res) => {
     console.log(`📤 Processing n8n message to ${to}: ${message.substring(0, 50)}...`);
     
     // Save to database as outgoing message
-    const contact = await dbHelpers.findOrCreateContact(to, contactName);
-    const chat = await dbHelpers.findOrCreateChat(contact.id, to);
-    
-    const savedMessage = await dbHelpers.addMessage(chat.id, contact.id, {
-      type: 'sent',
-      content: message,
-      whatsappMessageId: messageId || `n8n-${Date.now()}`,
-      timestamp: new Date(timestamp),
-      status: 'sent'
-    });
-    
-    // Store in memory for backward compatibility
-    if (!chats[to]) {
-      chats[to] = {
-        number: to,
-        name: contactName || `+${to}`,
-        messages: [],
-        unread: 0,
-        lastMessage: new Date()
-      };
-    }
-    
-    chats[to].messages.push({
-      id: messageId || `n8n-${Date.now()}`,
-      text: message,
-      timestamp: new Date(timestamp),
-      type: 'sent',
-      from: 'me'
-    });
-    
-    chats[to].lastMessage = new Date();
-    
-    // Notify connected clients via Socket.IO
-    io.emit('new_message', {
-      from: to,
-      message: message,
-      timestamp: new Date(timestamp),
-      contactName: contact.name,
-      messageId: savedMessage.id,
-      source: 'n8n',
-      direction: 'outgoing'
-    });
-    
-    console.log(`✅ n8n message saved to database for ${to}`);
-    
-    res.status(200).json({ 
-      success: true, 
-      messageId: savedMessage.id,
-      databaseId: savedMessage.id,
-      timestamp: new Date().toISOString(),
-      message: 'Message saved to database successfully'
-    });
-    
-  } catch (error) {
-    console.error('❌ Error processing n8n message:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
-  }
-});
-
-// ==================== DASHBOARD ENDPOINTS ====================
-
-// API: Send message from dashboard
-app.post('/api/send', async (req, res) => {
-  try {
-    const { to, message } = req.body;
-    
-    if (!to || !message) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing to or message field'
-      });
-    }
-    
-    console.log(`📤 Dashboard sending message to ${to}: ${message.substring(0, 50)}...`);
-    
-    // 1. Send via WhatsApp API
-    const response = await axios.post(
-      `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to: to,
-        type: "text",
-        text: {
-          preview_url: false,
-          body: message
-        }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.ACCESS_TOKEN}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    
-    const whatsappMessageId = response.data.messages?.[0]?.id;
-    
-    // 2. Save to PostgreSQL database
-    const contact = await dbHelpers.findOrCreateContact(to);
-    const chat = await dbHelpers.findOrCreateChat(contact.id, to);
-    
-    const savedMessage = await dbHelpers.addMessage(chat.id, contact.id, {
-      type: 'sent',
-      content: message,
-      whatsappMessageId: whatsappMessageId,
-      timestamp: new Date(),
-      status: 'sent'
-    });
-    
-    console.log(`💾 Saved dashboard message to database: ${to}`);
-    
-    // 3. Forward to n8n
-    const n8nResult = await forwardToN8N({
-      phone: to,
-      content: message,
-      timestamp: new Date(),
-      contactName: contact.name,
-      messageId: whatsappMessageId,
-      type: 'sent',
-      contactId: contact.id,
-      chatId: chat.id
-    }, 'dashboard_outgoing');
-    
-    // 4. Store in memory for backward compatibility
-    if (!chats[to]) {
-      chats[to] = {
-        number: to,
-        name: contact.name || `+${to}`,
-        messages: [],
-        unread: 0,
-        lastMessage: new Date()
-      };
-    }
-    
-    chats[to].messages.push({
-      id: whatsappMessageId,
-      text: message,
-      timestamp: new Date(),
-      type: 'sent',
-      from: 'me'
-    });
-    
-    chats[to].lastMessage = new Date();
-    
-    // 5. Notify via Socket.IO
-    io.emit('message_sent', {
-      to: to,
-      message: message,
-      messageId: savedMessage.id,
-      whatsappMessageId: whatsappMessageId,
-      timestamp: new Date(),
-      n8nForwarded: n8nResult.success
-    });
-    
-    res.json({ 
-      success: true, 
-      data: response.data,
-      databaseId: savedMessage.id,
-      n8nForwarded: n8nResult.success,
-      message: 'Message sent successfully'
-    });
-    
-  } catch (error) {
-    console.error('❌ Send message error:', error.response?.data || error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: error.response?.data || error.message 
-    });
-  }
-});
-
-// API: Get all chats (from database)
-app.get('/api/chats', async (req, res) => {
-  try {
-    cleanupOldData();
-    
-    // Try to get from database first
-    const dbChats = await dbHelpers.getAllChats();
-    
-    if (dbChats.length > 0) {
-      // Convert to frontend format
-      const formattedChats = dbChats.map(chat => ({
-        id: chat.id,
-        number: chat.phone_number,
-        name: chat.contact_name || `+${chat.phone_number}`,
-        messages: [], // Messages loaded separately
-        unread: chat.unread_count || 0,
-        lastMessage: chat.last_message,
-        lastMessageAt: chat.last_message_at,
-        contactInfo: {
-          name: chat.contact_name,
-          status: chat.contact_status,
-          email: chat.contact_email
-        }
-      }));
-      
-      res.json(formattedChats);
-    } else {
-      // Fallback to memory chats
-      res.json(Object.values(chats));
-    }
-    
-  } catch (error) {
-    console.error('Error getting chats:', error);
-    // Fallback to memory chats on error
-    res.json(Object.values(chats));
-  }
-});
-
-// API: Get messages of specific chat (from database)
-app.get('/api/chats/:number/messages', async (req, res) => {
-  const number = req.params.number;
-  
-  try {
-    // Try to get from database
-    await dbHelpers.markChatAsRead(number);
-    const messages = await dbHelpers.getChatMessages(number);
-    
-    if (messages.length > 0) {
-      res.json(messages.map(msg => ({
-        id: msg.id,
-        text: msg.content,
-        timestamp: msg.timestamp,
-        type: msg.message_type,
-        from: msg.message_type === 'received' ? number : 'me',
-        status: msg.status
-      })));
-    } else {
-      // Fallback to memory
-      if (chats[number]) {
-        chats[number].unread = 0;
-        res.json(chats[number].messages);
-      } else {
-        res.json([]);
-      }
-    }
-    
-  } catch (error) {
-    console.error('Error getting messages:', error);
-    // Fallback to memory
-    if (chats[number]) {
-      chats[number].unread = 0;
-      res.json(chats[number].messages);
-    } else {
-      res.json([]);
-    }
-  }
-});
-
-// ==================== UTILITY ENDPOINTS ====================
-
-// Ping endpoint
-app.get('/ping', (req, res) => {
-  res.json({
-    status: 'pong',
-    timestamp: new Date().toISOString(),
-    service: 'WhatsApp Backend API',
-    uptime: process.uptime(),
-    n8nIntegration: {
-      enabled: true,
-      webhookUrl: N8N_WEBHOOK_URL,
-      status: 'active'
-    },
-    database: 'PostgreSQL connected',
-    chats_count: Object.keys(chats).length
-  });
-});
-
-// Health check endpoint
-app.get('/health', async (req, res) => {
-  try {
-    // Test database connection
-    await pool.query('SELECT 1');
-    
-    // Test n8n connection (optional)
-    let n8nStatus = 'not_tested';
-    try {
-      const testResponse = await axios.get(N8N_WEBHOOK_URL.replace('/webhook/whatsapp', ''), {
-        timeout: 3000
-      });
-      n8nStatus = 'reachable';
-    } catch {
-      n8nStatus = 'webhook_only';
-    }
-    
-    res.json({ 
-      status: 'healthy',
-      timestamp: new Date().toISOString(),
-      service: 'WhatsApp Business API',
-      version: '2.1.0',
-      environment: process.env.NODE_ENV || 'development',
-      database: 'connected',
-      n8nIntegration: {
-        enabled: true,
-        webhookUrl: N8N_WEBHOOK_URL,
-        status: n8nStatus
-      }
-    });
-  } catch (error) {
-    res.json({
-      status: 'degraded',
-      timestamp: new Date().toISOString(),
-      service: 'WhatsApp Business API',
-      version: '2.1.0',
-      environment: process.env.NODE_ENV || 'development',
-      database: 'disconnected',
-      n8nIntegration: {
-        enabled: true,
-        webhookUrl: N8N_WEBHOOK_URL,
-        status: 'active'
-      },
-      warning: 'Database connection failed'
-    });
-  }
-});
-
-// Root endpoint
-app.get('/', (req, res) => {
-  res.json({
-    service: 'WhatsApp Business API Backend',
-    status: 'running',
-    version: '2.1.0',
-    database: 'PostgreSQL',
-    n8nIntegration: {
-      url: N8N_WEBHOOK_URL,
-      status: 'active'
-    },
-    features: [
-      'Webhook handling',
-      'Message storage in database',
-      'Real-time updates',
-      'Contact management',
-      'Chat persistence',
-      'n8n Integration (Dual-way)'
-    ],
-    endpoints: {
-      webhook: '/webhook (GET/POST)',
-      chats: '/api/chats (GET)',
-      send: '/api/send (POST)',
-      'n8n-messages': '/api/n8n/messages (POST)',
-      health: '/health (GET)',
-      ping: '/ping (GET)'
-    }
-  });
-});
-
-// Socket.IO connection handler
-io.on('connection', (socket) => {
-  console.log('🔌 New client connected:', socket.id);
-  
-  socket.emit('connection_established', {
-    message: 'Connected to WhatsApp Backend',
-    n8nEnabled: true,
-    timestamp: new Date().toISOString()
-  });
-  
-  socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
-  });
-});
-
-// Auto cleanup every 30 minutes (for memory chats)
-setInterval(cleanupOldData, 30 * 60 * 1000);
-
-// Start Server
-async function startServer() {
-  try {
-    // Initialize database
-    await initializeDatabase();
-    console.log('📊 Database initialization complete');
-    
-    // Test database connection
-    await pool.query('SELECT 1');
-    console.log('✅ PostgreSQL connection established');
-    
-    console.log('🔄 n8n Integration Status:');
-    console.log(`   Webhook URL: ${N8N_WEBHOOK_URL}`);
-    console.log('   Direction: Dual-way (WhatsApp → n8n AND Dashboard → n8n)');
-    
-    const PORT = process.env.PORT || 10000;
-    server.listen(PORT, '0.0.0.0', () => {
-      console.log(`🚀 WhatsApp Backend Server started`);
-      console.log(`📍 Port: ${PORT}`);
-      console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`💾 Database: PostgreSQL connected`);
-      console.log(`🔄 n8n Integration: ACTIVE`);
-      console.log(`📞 Endpoint: http://localhost:${PORT}`);
-      console.log(`🔗 n8n Webhook: ${N8N_WEBHOOK_URL}`);
-      console.log(`📤 All messages will be forwarded to n8n`);
-    });
-    
-  } catch (error) {
-    console.error('❌ Failed to start server:', error);
-    process.exit(1);
-  }
-}
-
-// Start the server
-startServer();
+    const contact = await dbHelpers.findOr
