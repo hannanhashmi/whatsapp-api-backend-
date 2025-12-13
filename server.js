@@ -762,34 +762,6 @@ function getDocumentType(mimeType) {
   return mimeMap[mimeType] || 'Document';
 }
 
-// Helper function to get file extension
-function getFileExtension(mimeType, filename = '') {
-  // Try to get from filename first
-  if (filename) {
-    const parts = filename.split('.');
-    if (parts.length > 1) {
-      return parts.pop().toLowerCase();
-    }
-  }
-  
-  // Fallback to mime type mapping
-  const mimeToExt = {
-    'application/pdf': 'pdf',
-    'application/msword': 'doc',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
-    'application/vnd.ms-excel': 'xls',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
-    'application/vnd.ms-powerpoint': 'ppt',
-    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
-    'text/plain': 'txt',
-    'text/html': 'html',
-    'text/csv': 'csv',
-    'application/json': 'json',
-    'application/xml': 'xml'
-  };
-  
-  return mimeToExt[mimeType] || 'file';
-}
 
 // ==================== N8N INTEGRATION ENDPOINTS ====================
 
