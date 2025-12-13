@@ -203,47 +203,81 @@ const dbHelpers = {
   },
 
   // Message Functions
-  async addMessage(chatId, contactId, messageData) {
-    try {
-      // Insert message
-      const messageResult = await pool.query(
-        `INSERT INTO messages 
-         (chat_id, contact_id, message_type, content, whatsapp_message_id, status, timestamp)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING *`,
-        [
-          chatId,
-          contactId,
-          messageData.type,
-          messageData.content,
-          messageData.whatsappMessageId,
-          messageData.status || 'delivered',
-          messageData.timestamp || new Date()
-        ]
-      );
-
-      // Update chat metadata
-      await pool.query(
-        `UPDATE chats 
-         SET last_message = $1,
-             last_message_at = $2,
-             unread_count = unread_count + $3,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = $4`,
-        [
-          messageData.content.substring(0, 200),
-          messageData.timestamp || new Date(),
-          messageData.type === 'received' ? 1 : 0,
-          chatId
-        ]
-      );
-
-      return messageResult.rows[0];
-    } catch (error) {
-      console.error('Add message error:', error);
-      throw error;
+ // Updated addMessage function with better media handling
+async function addMessage(chatId, contactId, messageData) {
+  try {
+    // Prepare content for last_message field
+    let lastMessageContent = null;
+    
+    if (messageData.content) {
+      lastMessageContent = messageData.content.substring(0, 200);
+    } else if (messageData.mediaInfo) {
+      // Show media indicator in last message preview
+      switch(messageData.mediaInfo.type) {
+        case 'image':
+          lastMessageContent = '🖼️ Image';
+          break;
+        case 'audio':
+          lastMessageContent = '🎵 Audio Message';
+          break;
+        case 'video':
+          lastMessageContent = '🎬 Video';
+          break;
+        case 'document':
+          lastMessageContent = '📄 Document';
+          break;
+        default:
+          lastMessageContent = '📁 Media';
+      }
+      
+      if (messageData.mediaInfo.caption) {
+        lastMessageContent += `: ${messageData.mediaInfo.caption.substring(0, 100)}`;
+      }
     }
-  },
+
+    // Insert message with media info
+    const messageResult = await pool.query(
+      `INSERT INTO messages 
+       (chat_id, contact_id, message_type, content, whatsapp_message_id, 
+        status, timestamp, message_type_detail, media_info, media_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING *`,
+      [
+        chatId,
+        contactId,
+        messageData.type,
+        messageData.content,
+        messageData.whatsappMessageId,
+        messageData.status || 'delivered',
+        messageData.timestamp || new Date(),
+        messageData.messageTypeDetail || null,
+        messageData.mediaInfo ? JSON.stringify(messageData.mediaInfo) : null,
+        messageData.mediaInfo?.type || null  // Add media_type column for easier filtering
+      ]
+    );
+
+    // Update chat metadata
+    await pool.query(
+      `UPDATE chats 
+       SET last_message = $1,
+           last_message_at = $2,
+           unread_count = unread_count + $3,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4`,
+      [
+        lastMessageContent,
+        messageData.timestamp || new Date(),
+        messageData.type === 'received' ? 1 : 0,
+        chatId
+      ]
+    );
+
+    return messageResult.rows[0];
+  } catch (error) {
+    console.error('Add message error:', error);
+    throw error;
+  }
+}
 
   // Get all chats
   async getAllChats(limit = 100) {
