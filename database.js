@@ -89,6 +89,96 @@ async function initializeDatabase() {
   }
 }
 
+// Media Processing Functions
+const MediaDB = {
+  // Save media file to server/database
+  async saveMediaFile(mediaData) {
+    try {
+      const { 
+        type, 
+        mimeType, 
+        data, 
+        fileName,
+        whatsappMessageId 
+      } = mediaData;
+      
+      // Generate unique filename
+      const fileExtension = this.getFileExtension(mimeType);
+      const uniqueFileName = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}.${fileExtension}`;
+      
+      // Save file path - adjust according to your storage system
+      const filePath = `uploads/media/${type}s/${uniqueFileName}`;
+      
+      // Save to database
+      const result = await query(
+        `INSERT INTO media_files 
+         (whatsapp_message_id, file_type, mime_type, file_path, file_name, original_name)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [whatsappMessageId, type, mimeType, filePath, uniqueFileName, fileName]
+      );
+      
+      // Save file to disk (if using filesystem)
+      // await this.saveFileToDisk(filePath, data);
+      
+      return {
+        ...result.rows[0],
+        url: `/api/media/${result.rows[0].id}` // Generate accessible URL
+      };
+    } catch (error) {
+      console.error('Save media error:', error);
+      throw error;
+    }
+  },
+
+  // Get file extension from mime type
+  getFileExtension(mimeType) {
+    const mimeToExt = {
+      'image/jpeg': 'jpg',
+      'image/png': 'png',
+      'image/gif': 'gif',
+      'audio/ogg': 'ogg',
+      'audio/mpeg': 'mp3',
+      'audio/aac': 'aac',
+      'video/mp4': 'mp4',
+      'application/pdf': 'pdf',
+      'text/plain': 'txt'
+    };
+    
+    return mimeToExt[mimeType] || 'bin';
+  },
+
+  // Process WhatsApp media message
+  async processWhatsAppMedia(mediaData) {
+    const mediaInfo = {
+      type: mediaData.type,
+      mimeType: mediaData.mime_type,
+      fileSize: mediaData.file_size,
+      caption: mediaData.caption
+    };
+
+    // If we have file data, save it
+    if (mediaData.data || mediaData.url) {
+      const savedMedia = await this.saveMediaFile({
+        type: mediaData.type,
+        mimeType: mediaData.mime_type,
+        data: mediaData.data,
+        fileName: mediaData.file_name,
+        whatsappMessageId: mediaData.whatsapp_message_id
+      });
+      
+      mediaInfo.fileId = savedMedia.id;
+      mediaInfo.url = savedMedia.url;
+      mediaInfo.filePath = savedMedia.file_path;
+    } else if (mediaData.url) {
+      // If it's already a URL
+      mediaInfo.url = mediaData.url;
+    }
+
+    return mediaInfo;
+  }
+};
+
 module.exports = {
   pool,
   initializeDatabase,
