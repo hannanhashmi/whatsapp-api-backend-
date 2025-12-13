@@ -469,27 +469,199 @@ app.post('/webhook', async (req, res) => {
 });
 
 // Process incoming WhatsApp message
+
+
+// Process incoming WhatsApp message - COMPLETE VERSION
 async function processIncomingMessage(message, metaPayload = null) {
   const phone = message.from;
-  const content = message.text?.body || '[Media/File Message]';
   const timestamp = new Date(message.timestamp * 1000);
   
-  console.log(`💬 Processing WhatsApp message from ${phone}: ${content.substring(0, 50)}...`);
+  console.log(`💬 Processing WhatsApp message from ${phone}, type: ${message.type}`);
   
   try {
-    // 1. Save to PostgreSQL database
+    // **Step 1: Differentiate ALL message types**
+    let content = '';
+    let mediaInfo = null;
+    let messageTypeDetail = message.type;
+    
+    // Text Message
+    if (message.type === 'text') {
+      content = message.text?.body || '[Text Message]';
+    } 
+    // Audio/Voice Message
+    else if (message.type === 'audio' || message.type === 'voice') {
+      const audio = message.audio || message.voice;
+      if (audio) {
+        content = `🎵 Audio Message (${audio.mime_type || 'audio/ogg'}, ${formatBytes(audio.file_size)})`;
+        mediaInfo = {
+          type: 'audio',
+          mime_type: audio.mime_type || 'audio/ogg',
+          file_size: audio.file_size,
+          id: audio.id,
+          duration: audio.duration || 'unknown',
+          sha256: audio.sha256,
+          voice_message: (message.type === 'voice')
+        };
+      } else {
+        content = '🎵 Audio Message';
+      }
+    }
+    // Image Message
+    else if (message.type === 'image') {
+      const image = message.image;
+      if (image) {
+        const captionText = image.caption ? ` - ${image.caption}` : '';
+        content = `🖼️ Image${captionText} (${image.mime_type || 'image/jpeg'}, ${formatBytes(image.file_size)})`;
+        mediaInfo = {
+          type: 'image',
+          mime_type: image.mime_type || 'image/jpeg',
+          file_size: image.file_size,
+          id: image.id,
+          caption: image.caption || '',
+          sha256: image.sha256,
+          width: image.width,
+          height: image.height
+        };
+      } else {
+        content = '🖼️ Image';
+      }
+    }
+    // Document Message (PDF, Excel, Word, HTML, etc.)
+    else if (message.type === 'document') {
+      const document = message.document;
+      if (document) {
+        const filename = document.filename || getDocumentType(document.mime_type);
+        const captionText = document.caption ? ` - ${document.caption}` : '';
+        content = `📄 ${filename}${captionText} (${document.mime_type}, ${formatBytes(document.file_size)})`;
+        mediaInfo = {
+          type: 'document',
+          mime_type: document.mime_type,
+          file_size: document.file_size,
+          id: document.id,
+          filename: document.filename || '',
+          caption: document.caption || '',
+          sha256: document.sha256,
+          document_type: getFileExtension(document.mime_type, document.filename)
+        };
+      } else {
+        content = '📄 Document';
+      }
+    }
+    // Video Message
+    else if (message.type === 'video') {
+      const video = message.video;
+      if (video) {
+        const captionText = video.caption ? ` - ${video.caption}` : '';
+        content = `🎬 Video${captionText} (${video.mime_type || 'video/mp4'}, ${formatBytes(video.file_size)})`;
+        mediaInfo = {
+          type: 'video',
+          mime_type: video.mime_type || 'video/mp4',
+          file_size: video.file_size,
+          id: video.id,
+          caption: video.caption || '',
+          duration: video.duration || 'unknown',
+          sha256: video.sha256
+        };
+      } else {
+        content = '🎬 Video';
+      }
+    }
+    // Sticker
+    else if (message.type === 'sticker') {
+      content = '😀 Sticker';
+      mediaInfo = {
+        type: 'sticker'
+      };
+    }
+    // Location
+    else if (message.type === 'location') {
+      const location = message.location;
+      if (location) {
+        content = `📍 Location: ${location.name || 'Shared Location'} (${location.latitude}, ${location.longitude})`;
+        mediaInfo = {
+          type: 'location',
+          latitude: location.latitude,
+          longitude: location.longitude,
+          name: location.name || '',
+          address: location.address || ''
+        };
+      } else {
+        content = '📍 Location';
+      }
+    }
+    // Contact
+    else if (message.type === 'contacts') {
+      content = '👤 Contact Shared';
+      mediaInfo = {
+        type: 'contact',
+        contacts: message.contacts || []
+      };
+    }
+    // Interactive Messages (Buttons, Lists)
+    else if (message.type === 'interactive') {
+      const interactive = message.interactive;
+      if (interactive) {
+        if (interactive.type === 'button_reply') {
+          content = `🔘 Button: ${interactive.button_reply?.title || 'Button Clicked'}`;
+        } else if (interactive.type === 'list_reply') {
+          content = `📋 List Selection: ${interactive.list_reply?.title || 'List Item Selected'}`;
+        } else {
+          content = '🔄 Interactive Message';
+        }
+        mediaInfo = {
+          type: 'interactive',
+          interactive_type: interactive.type,
+          data: interactive
+        };
+      } else {
+        content = '🔄 Interactive';
+      }
+    }
+    // Reaction
+    else if (message.type === 'reaction') {
+      const reaction = message.reaction;
+      if (reaction) {
+        content = `${reaction.emoji} Reaction to message ${reaction.message_id}`;
+        mediaInfo = {
+          type: 'reaction',
+          emoji: reaction.emoji,
+          message_id: reaction.message_id
+        };
+      } else {
+        content = '👍 Reaction';
+      }
+    }
+    // Unknown/Other message types
+    else {
+      content = `[${message.type.toUpperCase()} Message]`;
+      mediaInfo = {
+        type: message.type,
+        raw_data: message
+      };
+    }
+    
+    // **Step 2: Save to PostgreSQL database**
     const contact = await dbHelpers.findOrCreateContact(phone);
     const chat = await dbHelpers.findOrCreateChat(contact.id, phone);
     
-    const savedMessage = await dbHelpers.addMessage(chat.id, contact.id, {
+    // Prepare message data with media info
+    const messageData = {
       type: 'received',
       content: content,
       whatsappMessageId: message.id,
       timestamp: timestamp,
-      status: 'delivered'
-    });
+      status: 'delivered',
+      messageTypeDetail: messageTypeDetail
+    };
+    
+    // If media exists, store additional info
+    if (mediaInfo) {
+      messageData.mediaInfo = mediaInfo;
+    }
+    
+    const savedMessage = await dbHelpers.addMessage(chat.id, contact.id, messageData);
 
-    // 2. Forward to n8n IMMEDIATELY
+    // **Step 3: Forward to n8n with complete media info**
     const n8nForwardResult = await forwardToN8N({
       phone: phone,
       content: content,
@@ -499,17 +671,19 @@ async function processIncomingMessage(message, metaPayload = null) {
       type: 'received',
       contactId: contact.id,
       chatId: chat.id,
+      messageType: messageTypeDetail, // Add message type
+      mediaInfo: mediaInfo, // Include media details
       metaPayload: metaPayload // Pass full Meta payload
     }, 'whatsapp_incoming');
     
     // Log n8n forwarding result
     if (n8nForwardResult.success) {
-      console.log("✅ WhatsApp message forwarded to n8n successfully");
+      console.log(`✅ ${messageTypeDetail.toUpperCase()} message forwarded to n8n successfully`);
     } else {
-      console.log("⚠️ WhatsApp message saved but n8n forwarding failed");
+      console.log(`⚠️ ${messageTypeDetail.toUpperCase()} message saved but n8n forwarding failed`);
     }
     
-    // 3. Store in memory for backward compatibility
+    // **Step 4: Store in memory for backward compatibility**
     if (!chats[phone]) {
       chats[phone] = {
         number: phone,
@@ -525,28 +699,96 @@ async function processIncomingMessage(message, metaPayload = null) {
       text: content,
       timestamp: timestamp,
       type: 'received',
-      from: phone
+      from: phone,
+      messageType: messageTypeDetail, // Store message type
+      mediaInfo: mediaInfo // Store media info
     });
     
     chats[phone].lastMessage = timestamp;
     chats[phone].unread++;
     
-    // 4. Notify connected clients via Socket.IO
+    // **Step 5: Notify connected clients via Socket.IO**
     io.emit('new_message', {
       from: phone,
       message: content,
       timestamp: timestamp,
       contactName: contact.name,
       messageId: savedMessage.id,
+      messageType: messageTypeDetail, // Add message type
+      mediaInfo: mediaInfo, // Include media details
       source: 'whatsapp',
       n8nForwarded: n8nForwardResult.success
     });
     
-    console.log(`💾 Saved WhatsApp message to database and forwarded to n8n: ${phone}`);
+    console.log(`💾 Saved ${messageTypeDetail} message to database and forwarded to n8n: ${phone}`);
     
   } catch (error) {
     console.error('Error processing incoming WhatsApp message:', error);
   }
+}
+
+// Helper function to format file sizes
+function formatBytes(bytes, decimals = 2) {
+  if (!bytes || bytes === 0) return '0 Bytes';
+  
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+}
+
+// Helper function to get document type from mime type
+function getDocumentType(mimeType) {
+  const mimeMap = {
+    'application/pdf': 'PDF Document',
+    'application/msword': 'Word Document',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word Document',
+    'application/vnd.ms-excel': 'Excel Spreadsheet',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'Excel Spreadsheet',
+    'application/vnd.ms-powerpoint': 'PowerPoint Presentation',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PowerPoint Presentation',
+    'text/plain': 'Text File',
+    'text/html': 'HTML File',
+    'text/csv': 'CSV File',
+    'application/zip': 'ZIP Archive',
+    'application/x-rar-compressed': 'RAR Archive',
+    'application/json': 'JSON File',
+    'application/xml': 'XML File'
+  };
+  
+  return mimeMap[mimeType] || 'Document';
+}
+
+// Helper function to get file extension
+function getFileExtension(mimeType, filename = '') {
+  // Try to get from filename first
+  if (filename) {
+    const parts = filename.split('.');
+    if (parts.length > 1) {
+      return parts.pop().toLowerCase();
+    }
+  }
+  
+  // Fallback to mime type mapping
+  const mimeToExt = {
+    'application/pdf': 'pdf',
+    'application/msword': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.ms-excel': 'xls',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'application/vnd.ms-powerpoint': 'ppt',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+    'text/plain': 'txt',
+    'text/html': 'html',
+    'text/csv': 'csv',
+    'application/json': 'json',
+    'application/xml': 'xml'
+  };
+  
+  return mimeToExt[mimeType] || 'file';
 }
 
 // ==================== N8N INTEGRATION ENDPOINTS ====================
