@@ -1,87 +1,3 @@
-const { query } = require('./database');
-
-// Contact functions
-const ContactDB = {
-  // Find or create contact
-  async findOrCreateContact(phoneNumber, name = null) {
-    try {
-      // Try to find existing contact
-      const result = await query(
-        'SELECT * FROM contacts WHERE phone_number = $1',
-        [phoneNumber]
-      );
-      
-      if (result.rows.length > 0) {
-        // Update last message time and increment count
-        await query(
-          `UPDATE contacts 
-           SET last_message_at = CURRENT_TIMESTAMP,
-               message_count = message_count + 1,
-               updated_at = CURRENT_TIMESTAMP
-           WHERE phone_number = $1`,
-          [phoneNumber]
-        );
-        return result.rows[0];
-      }
-      
-      // Create new contact
-      const newContact = await query(
-        `INSERT INTO contacts 
-         (phone_number, name, last_message_at, message_count) 
-         VALUES ($1, $2, CURRENT_TIMESTAMP, 1)
-         RETURNING *`,
-        [phoneNumber, name || `+${phoneNumber}`]
-      );
-      
-      return newContact.rows[0];
-    } catch (error) {
-      console.error('Contact find/create error:', error);
-      throw error;
-    }
-  },
-
-  // Get all contacts
-  async getAllContacts(limit = 100) {
-    const result = await query(
-      `SELECT * FROM contacts 
-       ORDER BY last_message_at DESC NULLS LAST, created_at DESC 
-       LIMIT $1`,
-      [limit]
-    );
-    return result.rows;
-  },
-
-  // Update contact
-  async updateContact(id, updates) {
-    const fields = [];
-    const values = [];
-    let paramCount = 1;
-
-    Object.keys(updates).forEach(key => {
-      if (updates[key] !== undefined) {
-        fields.push(`${key} = $${paramCount}`);
-        values.push(updates[key]);
-        paramCount++;
-      }
-    });
-
-    if (fields.length === 0) return null;
-
-    fields.push('updated_at = CURRENT_TIMESTAMP');
-    values.push(id);
-
-    const queryStr = `
-      UPDATE contacts 
-      SET ${fields.join(', ')} 
-      WHERE id = $${paramCount} 
-      RETURNING *
-    `;
-
-    const result = await query(queryStr, values);
-    return result.rows[0];
-  }
-};
-
 // Chat functions
 const ChatDB = {
   // Find or create chat
@@ -112,14 +28,15 @@ const ChatDB = {
     }
   },
 
-  // Add message to chat
+  // Updated addMessage function with media support
   async addMessage(chatId, contactId, messageData) {
     try {
-      // Insert message
+      // Insert message with media info
       const messageResult = await query(
         `INSERT INTO messages 
-         (chat_id, contact_id, message_type, content, whatsapp_message_id, status, timestamp)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (chat_id, contact_id, message_type, content, whatsapp_message_id, 
+          status, timestamp, message_type_detail, media_info)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING *`,
         [
           chatId,
@@ -128,7 +45,9 @@ const ChatDB = {
           messageData.content,
           messageData.whatsappMessageId,
           messageData.status || 'delivered',
-          messageData.timestamp || new Date()
+          messageData.timestamp || new Date(),
+          messageData.messageTypeDetail || null,
+          messageData.mediaInfo ? JSON.stringify(messageData.mediaInfo) : null
         ]
       );
 
@@ -141,7 +60,7 @@ const ChatDB = {
              updated_at = CURRENT_TIMESTAMP
          WHERE id = $4`,
         [
-          messageData.content.substring(0, 200),
+          messageData.content ? messageData.content.substring(0, 200) : null,
           messageData.timestamp || new Date(),
           messageData.type === 'received' ? 1 : 0,
           chatId
@@ -200,10 +119,4 @@ const ChatDB = {
       [phoneNumber]
     );
   }
-};
-
-module.exports = {
-  ContactDB,
-  ChatDB,
-  query
 };
