@@ -89,27 +89,50 @@ function getFileExtension(mimeType, filename = '') {
 }
 
 // Download media file from WhatsApp API
+// Download media file from WhatsApp API - CORRECT VERSION
 async function downloadWhatsAppMedia(mediaId) {
   try {
-    console.log(`🔗 Getting download URL for media: ${mediaId}`);
+    console.log(`🔗 Getting media URL for ID: ${mediaId}`);
     
+    // WhatsApp Business API URL format
     const response = await axios.get(
-      `https://graph.facebook.com/v18.0/${mediaId}`,
+      `https://graph.facebook.com/v18.0/${mediaId}`,  // यह सही है
       {
         headers: {
-          'Authorization': `Bearer ${process.env.ACCESS_TOKEN}`
-        }
+          'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN || process.env.ACCESS_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 10000
       }
     );
     
-    console.log(`✅ Got download URL for media ${mediaId}`);
-    return response.data.url; // Temporary download URL
+    // Response में ये structure आता है:
+    // {
+    //   "url": "https://lookaside.fbsbx.com/whatsapp_business/...",
+    //   "mime_type": "image/jpeg",
+    //   "sha256": "...",
+    //   "file_size": 123456,
+    //   "id": "..."
+    // }
+    
+    if (response.data && response.data.url) {
+      console.log(`✅ Got media URL: ${response.data.url.substring(0, 50)}...`);
+      return response.data.url;
+    } else {
+      console.log('⚠️ Media URL not found in response:', response.data);
+      return null;
+    }
+    
   } catch (error) {
-    console.error('❌ Failed to get media URL:', error.response?.data || error.message);
+    console.error('❌ Failed to get media URL:', {
+      status: error.response?.status,
+      data: error.response?.data,
+      message: error.message,
+      mediaId: mediaId
+    });
     return null;
   }
 }
-
 // Save media to local server
 async function saveMediaToServer(downloadUrl, fileType, fileName, mediaId) {
   try {
